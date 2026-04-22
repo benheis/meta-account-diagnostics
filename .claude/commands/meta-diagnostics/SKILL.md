@@ -1,10 +1,10 @@
 ---
 name: meta-diagnostics
 description: >
-  Full Meta Ads account audit in one command. Runs 7 diagnostic analyses built on
-  Curtis Howland's Meta frameworks and Motion 2026 Creative Benchmarks. Generates a
+  Full Meta Ads account audit in one command. Runs 7 diagnostic analyses using
+  proven Meta advertising frameworks and Motion 2026 Creative Benchmarks. Generates a
   Markdown report saved locally and auto-launches an interactive Streamlit dashboard.
-  Prerequisite: ads-mcp-connector must be installed and connected to Meta.
+  Requires an MCP server with Meta Ads access (ads-mcp-connector recommended).
   Triggers: /meta-diagnostics, "run meta audit", "diagnose my Meta ads",
   "Meta account health check", "check my Meta account", "run the meta diagnostic".
 ---
