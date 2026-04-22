@@ -18,14 +18,18 @@ Run `/meta-diagnostics` and get:
 
 ```bash
 git clone https://github.com/benheis/meta-account-diagnostics.git
-cd meta-account-diagnostics
-bash install.sh
 ```
 
-Then restart Claude Code (or open a new session) and run:
+Open the `meta-account-diagnostics` folder in Claude Code. The `/meta-diagnostics` command is available immediately — no terminal setup required.
 
 ```
 /meta-diagnostics
+```
+
+**Want it available globally** (from any project, not just this folder)? Run:
+
+```bash
+bash install.sh
 ```
 
 ---
