@@ -1,0 +1,51 @@
+{
+  "_source": "Motion Creative Benchmarks 2026 — 550K+ ads, 6,000+ advertisers, $1.3B spend (Sep 2025–Jan 2026)",
+  "_winner_definition": "Ad spending >= 10x account median AND >= $500 floor",
+  "_suppressed_note": "Values marked null were suppressed in source report (insufficient sample). Fall back to 'all_verticals' for that tier.",
+  "spend_tiers": {
+    "Micro": "< $10K/month",
+    "Small": "$10K–$50K/month",
+    "Medium": "$50K–$200K/month",
+    "Large": "$200K–$1M/month",
+    "Enterprise": "$1M+/month"
+  },
+  "median_weekly_testing_volume": {
+    "Health & Wellness":      { "Micro": 3.8, "Small": 5.9,  "Medium": 11.2, "Large": 19.6, "Enterprise": 46.0 },
+    "Technology":             { "Micro": 3.3, "Small": 5.2,  "Medium": 11.1, "Large": 15.2, "Enterprise": 24.5 },
+    "Education":              { "Micro": 2.9, "Small": 4.9,  "Medium": 13.3, "Large": 24.3, "Enterprise": null },
+    "Fitness & Sports":       { "Micro": 3.4, "Small": 5.2,  "Medium": 12.0, "Large": 19.6, "Enterprise": 33.6 },
+    "Other":                  { "Micro": 3.6, "Small": 4.9,  "Medium": 12.9, "Large": 16.7, "Enterprise": 13.6 },
+    "Pets":                   { "Micro": 3.2, "Small": 4.8,  "Medium": 8.4,  "Large": 18.5, "Enterprise": 19.8 },
+    "Beauty & Personal Care": { "Micro": 3.4, "Small": 5.3,  "Medium": 8.7,  "Large": 14.7, "Enterprise": 31.9 },
+    "Fashion & Apparel":      { "Micro": 2.9, "Small": 5.1,  "Medium": 8.6,  "Large": 17.4, "Enterprise": 19.9 },
+    "Home & Lifestyle":       { "Micro": 3.2, "Small": 4.8,  "Medium": 8.4,  "Large": 15.9, "Enterprise": 26.1 },
+    "Food & Nutrition":       { "Micro": 3.1, "Small": 4.5,  "Medium": 8.1,  "Large": 14.4, "Enterprise": 26.9 },
+    "Finance":                { "Micro": 3.2, "Small": 4.7,  "Medium": 6.7,  "Large": 9.9,  "Enterprise": 16.4 },
+    "Entertainment & Media":  { "Micro": 3.1, "Small": 4.9,  "Medium": 8.4,  "Large": 14.6, "Enterprise": 20.2 },
+    "Automotive":             { "Micro": 4.1, "Small": 4.7,  "Medium": 6.0,  "Large": null, "Enterprise": 8.8  },
+    "Travel & Hospitality":   { "Micro": 3.2, "Small": 4.9,  "Medium": 7.1,  "Large": 9.3,  "Enterprise": 14.0 },
+    "Professional Services":  { "Micro": 3.4, "Small": 4.5,  "Medium": 7.0,  "Large": 11.1, "Enterprise": 14.1 },
+    "Parenting & Family":     { "Micro": 2.5, "Small": 4.2,  "Medium": 8.7,  "Large": 14.7, "Enterprise": 14.7 }
+  },
+  "top_quartile_weekly_volume": {
+    "Micro": 4.8,
+    "Small": 8.0,
+    "Medium": 15.9,
+    "Large": 31.1,
+    "Enterprise": 54.6
+  },
+  "avg_hit_rate_by_tier": {
+    "Micro":      { "hit_rate_pct": 4.03, "avg_creatives_per_week": 2.8,  "top_quartile_creatives_per_week": 4.8  },
+    "Small":      { "hit_rate_pct": 6.47, "avg_creatives_per_week": 4.1,  "top_quartile_creatives_per_week": 8.0  },
+    "Medium":     { "hit_rate_pct": 8.13, "avg_creatives_per_week": 6.6,  "top_quartile_creatives_per_week": 15.9 },
+    "Large":      { "hit_rate_pct": 8.64, "avg_creatives_per_week": 11.2, "top_quartile_creatives_per_week": 31.1 },
+    "Enterprise": { "hit_rate_pct": 8.80, "avg_creatives_per_week": 18.8, "top_quartile_creatives_per_week": 54.6 }
+  },
+  "all_verticals_fallback": {
+    "Micro": 3.3,
+    "Small": 4.9,
+    "Medium": 9.0,
+    "Large": 15.9,
+    "Enterprise": 22.7
+  }
+}

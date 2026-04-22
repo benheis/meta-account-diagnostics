@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "meta-diagnostics config",
+  "description": "Saved at ~/.meta-diagnostics-config.json. Written by /meta-diagnostics on first run.",
+  "type": "object",
+  "required": ["account_id", "conversion_event", "conversion_label", "industry_vertical", "winner_threshold"],
+  "properties": {
+    "deps_checked": {
+      "type": "boolean",
+      "description": "True once Python + pip + streamlit/plotly/pandas/requests have been confirmed installed."
+    },
+    "account_id": {
+      "type": "string",
+      "description": "Meta ad account ID. Should begin with act_ (e.g. act_123456789)."
+    },
+    "conversion_event": {
+      "type": "string",
+      "description": "The Meta conversion event being optimized (e.g. purchase, lead, complete_registration)."
+    },
+    "conversion_label": {
+      "type": "string",
+      "description": "Plain-English business label for the conversion event (e.g. 'paid subscription sign-up')."
+    },
+    "industry_vertical": {
+      "type": "string",
+      "enum": [
+        "Health & Wellness", "Technology", "Education", "Fitness & Sports",
+        "Pets", "Beauty & Personal Care", "Fashion & Apparel", "Home & Lifestyle",
+        "Food & Nutrition", "Finance", "Entertainment & Media", "Automotive",
+        "Travel & Hospitality", "Professional Services", "Parenting & Family", "Other"
+      ]
+    },
+    "winner_threshold": {
+      "type": "number",
+      "description": "Minimum lifetime spend (USD) for an ad to be considered a winner. Default: 3000.",
+      "default": 3000,
+      "minimum": 0
+    },
+    "spend_tier": {
+      "type": "string",
+      "enum": ["Micro", "Small", "Medium", "Large", "Enterprise"],
+      "description": "Derived from average monthly spend. Calculated and cached by the skill."
+    }
+  }
+}
