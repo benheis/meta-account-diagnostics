@@ -402,28 +402,75 @@ Distribute each ad's lifetime spend from `ads_6m` evenly across its active month
 **Data used:** `monthly_reach` (from `meta_get_monthly_reach`)
 
 **Calculations:**
-1. For each month M, estimate net new reach using the approximation:
-   - Full overlap calculation requires knowing unique reach across months, which isn't directly available.
-   - Use this proxy: net_new_reach[M] = reach[M] - (reach[M-12] * 0.5)
-   - Rationale: after 12 months, approximately 50% of the audience could be considered re-engagement (conservative). If no M-12 data, use reach[M] × 0.7 as estimate.
-   - Cap net_new at reach[M] (can't exceed total reach).
-2. cost_per_net_new_reach[M] = spend[M] / net_new_reach[M] (skip if net_new is 0).
-3. Trend: is net new reach direction over last 3 months up, flat, or down?
-4. Cost trend: is cost per net new reach up, flat, or down?
 
-**Verdict:**
-- HEALTHY: Net new reach stable or growing AND cost per net new reach flat or declining.
-- WARNING: Net new reach declining 2+ months in a row.
-- CRITICAL: Net new reach declining AND cost per net new reach rising.
+**Step 0 — Partial month handling:**
+Check whether the most recent month has fewer days elapsed than `days_in_month(M)`. If so, compute `reach_per_day[M] = reach[M] / elapsed_days` and use per-day values for all trend comparisons. Include `is_partial: true` on that month's row and a note in the report. Never compare a partial month's raw total against a full month's raw total.
+
+**Step 1 — Estimate net-new reach per month:**
+- If M−12 data exists: `net_new_reach[M] = max(reach[M] - reach[M-12] * 0.5, 0)`
+- If M−12 data does not exist: `net_new_reach[M] = reach[M] * 0.7` (fallback)
+- Track whether the fallback was used: `using_fallback = True` if ANY month used 0.7×
+- `net_new_ratio[M] = net_new_reach[M] / reach[M]` (will be exactly 0.70 for every fallback month)
+- `cost_per_net_new[M] = spend[M] / net_new_reach[M]` (skip if net_new_reach is 0 or spend is 0)
+
+**Step 2 — Signal A: Is cost per net-new rising materially?**
+- Take the last 6 active months (exclude the partial month from this window).
+- Split into prior half (oldest 3) and recent half (newest 3).
+- `prior_avg = mean(cost_per_net_new for prior 3 months)`
+- `recent_avg = mean(cost_per_net_new for recent 3 months)`
+- Signal A fires if `recent_avg ≥ prior_avg * 1.20` (≥20% increase).
+- Absolute floor: if `recent_avg < 0.50`, Signal A cannot fire regardless of slope (cost is too cheap for the delta to matter). Max verdict = WARNING if this floor applies.
+- Store: `signal_a_fired: bool`, `prior_avg_cost_pnn: float`, `recent_avg_cost_pnn: float`
+
+**Step 3 — Signal B: Is the net-new ratio structurally dropping?**
+- If `using_fallback` is True for all months: Signal B is suppressed. Every ratio will be exactly 0.70 — the formula cannot detect saturation without M−12 data.
+- Otherwise: compute trailing 6-month mean of `net_new_ratio` and most recent 3-month mean.
+- Signal B fires if `recent_3m_ratio ≤ trailing_6m_ratio - 0.05` (≥5 percentage point drop).
+- Store: `signal_b_fired: bool | null` (null = suppressed), `trailing_ratio: float`, `recent_ratio: float`
+
+**Step 4 — Verdict:**
+| Signal A | Signal B | Verdict |
+|---|---|---|
+| True | True | CRITICAL |
+| True | False | WARNING |
+| False | True | WARNING |
+| False | False | HEALTHY |
+| Either suppressed (all-fallback) | — | INSUFFICIENT_DATA |
+
+If `INSUFFICIENT_DATA`: set verdict to `"INSUFFICIENT_DATA"` and add to `data_warnings`:
+`"Reach saturation cannot be measured — fewer than 12 months of historical reach data available. Re-run after [date 12 months from earliest data point] when M−12 baseline exists."`
+Surface this as a neutral note card in the report, not a CRITICAL or WARNING.
+
+**Step 5 — Report note:**
+Always include a one-liner in the report explaining the calculation method:
+- If all fallback: `"Net-new reach estimated using 0.7× fallback for all N months (no M−12 baseline available)."`
+- If mixed: `"Net-new reach estimated using M−12 overlap formula for N months; 0.7× fallback used for M months where baseline was unavailable."`
 
 **Dashboard data dict:**
 ```json
 {
   "monthly_reach": [
-    {"month": "2025-01", "reach": 0, "net_new_reach": 0, "spend": 0.0, "cost_per_net_new": 0.0}
+    {
+      "month": "2025-01",
+      "reach": 0,
+      "net_new_reach": 0,
+      "net_new_ratio": 0.70,
+      "spend": 0.0,
+      "cost_per_net_new": 0.0,
+      "reach_per_day": 0.0,
+      "is_partial": false,
+      "used_fallback": true
+    }
   ],
-  "net_new_trend": "up|flat|down",
-  "cost_trend": "up|flat|down"
+  "signal_a_fired": false,
+  "signal_b_fired": null,
+  "prior_avg_cost_pnn": 0.0,
+  "recent_avg_cost_pnn": 0.0,
+  "trailing_ratio": 0.70,
+  "recent_ratio": 0.70,
+  "using_fallback": true,
+  "calculation_note": "Net-new reach estimated using 0.7× fallback for all 13 months (no M−12 baseline available).",
+  "data_warnings": []
 }
 ```
 

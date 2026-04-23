@@ -16,15 +16,17 @@ import pandas as pd
 RESULTS_PATH = Path.home() / "meta-diagnostics" / "results.json"
 
 VERDICT_COLORS = {
-    "HEALTHY": "#22c55e",
-    "WARNING":  "#f59e0b",
-    "CRITICAL": "#ef4444",
+    "HEALTHY":           "#22c55e",
+    "WARNING":           "#f59e0b",
+    "CRITICAL":          "#ef4444",
+    "INSUFFICIENT_DATA": "#6b7280",
 }
 
 VERDICT_BG = {
-    "HEALTHY": "#f0fdf4",
-    "WARNING":  "#fffbeb",
-    "CRITICAL": "#fef2f2",
+    "HEALTHY":           "#f0fdf4",
+    "WARNING":           "#fffbeb",
+    "CRITICAL":          "#fef2f2",
+    "INSUFFICIENT_DATA": "#f3f4f6",
 }
 
 
@@ -194,9 +196,21 @@ def chart_slugging_rate(data: dict):
 
 def chart_rolling_reach(data: dict):
     monthly = data.get("monthly_reach", [])
+    warnings = data.get("data_warnings", [])
+    calc_note = data.get("calculation_note", "")
+
     if not monthly:
         st.info("No reach data available.")
         return
+
+    # Surface insufficient-data state without a verdict card
+    if data.get("using_fallback") and data.get("signal_b_fired") is None:
+        st.warning(warnings[0] if warnings else "Reach saturation cannot be measured — no M−12 baseline yet.")
+        if calc_note:
+            st.caption(calc_note)
+    elif calc_note:
+        st.caption(calc_note)
+
     df = pd.DataFrame(monthly)
     fig = go.Figure()
     fig.add_bar(name="Total Reach", x=df["month"], y=df.get("reach", []),
@@ -204,15 +218,46 @@ def chart_rolling_reach(data: dict):
     fig.add_bar(name="Est. Net New Reach", x=df["month"], y=df.get("net_new_reach", []),
                 marker_color="#f97316")
     if "cost_per_net_new" in df.columns:
-        fig.add_scatter(name="Cost / Net New Reach", x=df["month"], y=df["cost_per_net_new"],
+        fig.add_scatter(name="Cost / Net New ($)", x=df["month"], y=df["cost_per_net_new"],
                         mode="lines+markers", yaxis="y2",
                         line=dict(color="#6366f1", width=2))
+
+    # Signal threshold annotations
+    prior_avg = data.get("prior_avg_cost_pnn")
+    recent_avg = data.get("recent_avg_cost_pnn")
+    if prior_avg and recent_avg:
+        threshold = prior_avg * 1.20
+        fig.add_hline(y=threshold, yref="y2", line_dash="dot", line_color="#ef4444",
+                      annotation_text=f"Signal A threshold (${threshold:.3f})",
+                      annotation_position="top left")
+
     fig.update_layout(
-        barmode="group", title="", height=340, margin=dict(t=10, b=10),
+        barmode="group", title="", height=360, margin=dict(t=10, b=10),
         yaxis2=dict(overlaying="y", side="right", title="Cost / Net New Reach ($)"),
         legend=dict(orientation="h", y=-0.25),
     )
     st.plotly_chart(fig, use_container_width=True)
+
+    # Signal summary below chart
+    signal_a = data.get("signal_a_fired")
+    signal_b = data.get("signal_b_fired")
+    col1, col2 = st.columns(2)
+    with col1:
+        if signal_a is True:
+            st.error(f"Signal A: Cost rising — ${prior_avg:.3f} → ${recent_avg:.3f} (+{(recent_avg/prior_avg-1)*100:.0f}%)")
+        elif signal_a is False:
+            st.success(f"Signal A: Cost stable — ${prior_avg:.3f} → ${recent_avg:.3f}")
+        else:
+            st.info("Signal A: Insufficient data")
+    with col2:
+        trailing = data.get("trailing_ratio")
+        recent = data.get("recent_ratio")
+        if signal_b is True:
+            st.error(f"Signal B: Ratio dropping — {trailing*100:.0f}% → {recent*100:.0f}% net-new")
+        elif signal_b is False:
+            st.success(f"Signal B: Ratio stable — {trailing*100:.0f}% → {recent*100:.0f}% net-new")
+        elif signal_b is None:
+            st.info("Signal B: Suppressed — no M−12 baseline")
 
 
 def chart_volume_vs_spend(data: dict):
@@ -229,9 +274,10 @@ def chart_volume_vs_spend(data: dict):
 
 
 def priority_action_stack(analyses: list[dict]):
-    criticals = [(a["title"], a["action"]) for a in analyses if a["verdict"] == "CRITICAL"]
-    warnings  = [(a["title"], a["action"]) for a in analyses if a["verdict"] == "WARNING"]
-    healthies = [(a["title"], a["action"]) for a in analyses if a["verdict"] == "HEALTHY"]
+    criticals  = [(a["title"], a["action"]) for a in analyses if a["verdict"] == "CRITICAL"]
+    warnings   = [(a["title"], a["action"]) for a in analyses if a["verdict"] == "WARNING"]
+    healthies  = [(a["title"], a["action"]) for a in analyses if a["verdict"] == "HEALTHY"]
+    # INSUFFICIENT_DATA analyses are excluded from the priority stack — they're informational notes, not actions
 
     st.markdown("---")
     st.markdown("## Priority Action Stack")
@@ -272,6 +318,7 @@ def main():
     n_critical = sum(1 for a in analyses if a["verdict"] == "CRITICAL")
     n_warning  = sum(1 for a in analyses if a["verdict"] == "WARNING")
     n_healthy  = sum(1 for a in analyses if a["verdict"] == "HEALTHY")
+    n_nodata   = sum(1 for a in analyses if a["verdict"] == "INSUFFICIENT_DATA")
 
     with st.sidebar:
         st.markdown("### Account Summary")
@@ -284,6 +331,8 @@ def main():
         st.markdown(f"<span style='color:#ef4444;font-weight:700'>🔴 CRITICAL: {n_critical}</span>", unsafe_allow_html=True)
         st.markdown(f"<span style='color:#f59e0b;font-weight:700'>🟡 WARNING: {n_warning}</span>", unsafe_allow_html=True)
         st.markdown(f"<span style='color:#22c55e;font-weight:700'>🟢 HEALTHY: {n_healthy}</span>", unsafe_allow_html=True)
+        if n_nodata:
+            st.markdown(f"<span style='color:#6b7280;font-weight:700'>⚪ INSUFFICIENT DATA: {n_nodata}</span>", unsafe_allow_html=True)
         st.markdown("---")
         st.caption(f"Run date: {run_date}")
 
