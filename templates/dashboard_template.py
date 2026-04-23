@@ -261,16 +261,74 @@ def chart_rolling_reach(data: dict):
 
 
 def chart_volume_vs_spend(data: dict):
-    your_launches = data.get("avg_monthly_launches", 0)
-    motion_median = data.get("motion_median_monthly", 0)
-    top_quartile = data.get("motion_top_quartile_monthly", 0)
-    labels = ["Your Launches", "Motion Median", "Top Quartile"]
-    values = [your_launches, motion_median, top_quartile]
-    colors = ["#1d4ed8", "#22c55e", "#a855f7"]
-    fig = go.Figure(go.Bar(x=labels, y=values, marker_color=colors))
-    fig.update_layout(title="", height=280, margin=dict(t=10, b=10),
-                      yaxis_title="Avg Monthly Creatives Launched")
+    your_launches  = data.get("avg_monthly_launches", 0)
+    motion_median  = data.get("motion_median_monthly", 0)
+    top_quartile   = data.get("motion_top_quartile_monthly", 0)
+    vertical       = data.get("vertical", "")
+    tier           = data.get("tier", "")
+    tier_range     = data.get("tier_spend_range", "")
+    run_rate       = data.get("account_monthly_run_rate", 0)
+    fallback_used  = data.get("fallback_used", False)
+    med_label      = data.get("median_cohort_label", f"{vertical} × {tier}-tier accounts")
+    topq_label     = data.get("top_quartile_cohort_label", f"All verticals × {tier}-tier accounts")
+    cross_vertical = data.get("top_quartile_is_cross_vertical", True)
+    launch_window  = data.get("launch_window", {})
+    bench_source   = data.get("benchmark_source", "Motion 2026 Creative Benchmarks")
+
+    window_label  = launch_window.get("label", "Last 3 months")
+    window_months = launch_window.get("months", [])
+    monthly_counts = launch_window.get("monthly_counts", [])
+
+    if fallback_used:
+        st.warning(f"⚠️ {vertical} benchmark suppressed for {tier} tier (insufficient sample). Showing all-verticals median instead.")
+
+    run_rate_str = f"~${run_rate/1000:.0f}K/mo" if run_rate else ""
+    bar_labels = [
+        f"Your Launches<br>{run_rate_str}",
+        f"{vertical} Median<br>{tier_range} cohort",
+        f"Cross-Vertical Top Quartile<br>{tier_range} cohort",
+    ]
+    fig = go.Figure()
+    fig.add_bar(name="Your Launches", x=[bar_labels[0]], y=[your_launches],
+                marker_color="#1d4ed8")
+    fig.add_bar(name=med_label, x=[bar_labels[1]], y=[motion_median],
+                marker_color="#22c55e")
+    # Different shade + pattern to signal different cohort definition
+    fig.add_bar(name=topq_label, x=[bar_labels[2]], y=[top_quartile],
+                marker=dict(color="#c084fc", pattern=dict(shape="/", fgcolor="#7e22ce")))
+
+    fig.update_layout(
+        title=dict(
+            text=f"{window_label} vs Motion 2026 benchmarks · {tier} tier ({tier_range})",
+            font=dict(size=13),
+        ),
+        height=320, margin=dict(t=40, b=10),
+        yaxis_title="Avg monthly creatives launched",
+        showlegend=False,
+    )
     st.plotly_chart(fig, use_container_width=True)
+
+    # Launch detail row
+    if window_months and monthly_counts and len(window_months) == len(monthly_counts):
+        detail = " · ".join(f"{m}: {c}" for m, c in zip(window_months, monthly_counts))
+        st.caption(f"Launch counts — {detail}")
+
+    if cross_vertical:
+        st.caption("ⓘ Top-quartile bar is cross-vertical — Motion doesn't publish vertical-level quartiles.")
+    st.caption(f"Source: {bench_source}")
+
+    # Tier reference table
+    tier_table = data.get("tier_benchmark_table", [])
+    if tier_table:
+        st.markdown("**Where you sit across spend tiers:**")
+        rows = []
+        for row in tier_table:
+            marker = " ← you" if row.get("is_current") else ""
+            rows.append({
+                "Spend tier": f"{row['tier']} ({row['spend_range']}){marker}",
+                f"{vertical} median (monthly)": f"{row['motion_median_monthly']:.0f}" if row['motion_median_monthly'] else "—",
+            })
+        st.table(rows)
 
 
 def priority_action_stack(analyses: list[dict]):

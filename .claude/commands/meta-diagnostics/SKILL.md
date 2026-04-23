@@ -494,15 +494,42 @@ Always include a one-liner in the report explaining the calculation method:
 - WARNING: avg_monthly_launches 50-80% of Motion median monthly.
 - CRITICAL: avg_monthly_launches < 50% of Motion median monthly.
 
+**Additional calculation — tier benchmark table:**
+For all 5 spend tiers, look up `median_weekly_testing_volume[vertical][tier]` from `motion-benchmarks.json` (fall back to `all_verticals_fallback` if null) and convert to monthly. Include this as `tier_benchmark_table` so the chart can show where the user sits across tiers.
+
+Also compute:
+- `tier_spend_range`: the human-readable range from `spend_tiers[tier]` in `motion-benchmarks.json`
+- `account_monthly_run_rate`: the account's average monthly spend over the 90d window (from `account_overview`)
+- `launch_window.months`: names of the 3 calendar months used for avg_monthly_launches (e.g. "Feb 2026", "Mar 2026", "Apr 2026 (MTD)")
+- `launch_window.monthly_counts`: the raw launch count for each of those 3 months
+
 **Dashboard data dict:**
 ```json
 {
   "avg_monthly_launches": 0.0,
   "motion_median_monthly": 0.0,
   "motion_top_quartile_monthly": 0.0,
-  "vertical": "Technology",
-  "tier": "Small",
-  "fallback_used": false
+  "vertical": "Finance",
+  "tier": "Medium",
+  "tier_spend_range": "$50K–$200K/month",
+  "account_monthly_run_rate": 72003,
+  "fallback_used": false,
+  "median_cohort_label": "Finance × Medium-tier accounts",
+  "top_quartile_cohort_label": "All verticals × Medium-tier accounts",
+  "top_quartile_is_cross_vertical": true,
+  "launch_window": {
+    "label": "Last 3 calendar months",
+    "months": ["Feb 2026", "Mar 2026", "Apr 2026 (MTD)"],
+    "monthly_counts": [0, 0, 0]
+  },
+  "tier_benchmark_table": [
+    {"tier": "Micro",      "spend_range": "< $10K/month",      "median_monthly": 0.0, "is_current": false},
+    {"tier": "Small",      "spend_range": "$10K–$50K/month",   "median_monthly": 0.0, "is_current": false},
+    {"tier": "Medium",     "spend_range": "$50K–$200K/month",  "median_monthly": 0.0, "is_current": true},
+    {"tier": "Large",      "spend_range": "$200K–$1M/month",   "median_monthly": 0.0, "is_current": false},
+    {"tier": "Enterprise", "spend_range": "$1M+/month",        "median_monthly": 0.0, "is_current": false}
+  ],
+  "benchmark_source": "Motion 2026 Creative Benchmarks (550K+ ads, 6,000+ advertisers, Sep 2025–Jan 2026)"
 }
 ```
 
