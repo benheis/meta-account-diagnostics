@@ -121,9 +121,21 @@ def chart_old_creative(data: dict):
 
 def chart_creative_churn(data: dict):
     cohorts = data.get("cohort_spend_by_month", [])
+    warnings = data.get("data_warnings", [])
     if not cohorts:
-        st.info("No cohort data available.")
+        msg = warnings[0] if warnings else "Cohort spend data unavailable — rerun the diagnostic with meta_get_ad_monthly_spend connected."
+        st.info(msg)
+        launches = data.get("monthly_launches", [])
+        if launches:
+            df_l = pd.DataFrame(launches)
+            fig = px.bar(df_l, x="month", y="count",
+                         title="Monthly launch volume (cohort spend curves unavailable)",
+                         labels={"count": "Ads launched", "month": "Month"})
+            fig.update_layout(height=280, margin=dict(t=30, b=10))
+            st.plotly_chart(fig, use_container_width=True)
         return
+    if warnings:
+        st.caption(f"⚠️ {warnings[0]}")
     df = pd.DataFrame(cohorts)
     cohort_cols = [c for c in df.columns if c != "month"]
     fig = go.Figure()

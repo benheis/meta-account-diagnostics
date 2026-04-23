@@ -304,14 +304,39 @@ Store the CPA label as: `"{conversion_event} Cost ({conversion_label})"` — use
 
 ### Analysis 4: Creative Churn
 
-**Data used:** `ads_6m`
+**Data used:** `meta_get_ad_monthly_spend(months=6)` — call this tool explicitly. It returns one entry per ad with a `monthly_spend` array of `{month, spend}` objects.
 
 **Calculations:**
-1. Group ads by launch month (`created_time` truncated to YYYY-MM).
-2. For each cohort, compute spend in month 1, 2, 3, 4+ from launch.
-3. Compute cohort half-life: months until spend share drops by 50%.
-4. Monthly new ad launch counts for last 6 months.
-5. Launch trend: compare month-over-month — growing, flat, or declining.
+
+Step 1 — Group ads into launch cohorts:
+- For each ad, extract launch month from `created_time` → YYYY-MM. This is the cohort key.
+- Build a dict: `cohorts = { "2025-11": [ad1, ad2, ...], "2025-12": [...], ... }`
+
+Step 2 — Build `cohort_spend_by_month`:
+- Enumerate every calendar month M in the 6-month window.
+- For each cohort C launched on or before M, sum `monthly_spend[month == M].spend` across all ads in C.
+- Output one row per calendar month:
+  `{"month": "2025-11", "Nov 2025 launches": 5234.10, "Oct 2025 launches": 3201.55}`
+- Cohort column name format: `"{Mon YYYY} launches"` (e.g. "Nov 2025 launches").
+- Only include cohorts that have non-zero spend in at least one month.
+
+Step 3 — Cohort half-life:
+- For each cohort C: find its peak spend month. Find the first subsequent month where spend drops below 50% of peak. Half-life = distance in months between peak and that month (minimum 1).
+- `avg_cohort_half_life_weeks` = mean half-life across all cohorts × 4.33.
+
+Step 4 — Monthly launch counts:
+- `monthly_launches` = for each month M, count of ads whose `created_time` falls in M.
+
+Step 5 — Launch trend:
+- Compare last 3 months' launch counts. Growing = each month higher than prior. Declining = each month lower. Flat = otherwise.
+
+**Fallback (if `meta_get_ad_monthly_spend` returns an error or empty):**
+Distribute each ad's lifetime spend from `ads_6m` evenly across its active months (launch month → today). Use this to approximate `cohort_spend_by_month`. Add to the output:
+```json
+"data_warnings": ["Cohort spend approximated using even distribution — actual spend is typically front-loaded. Run meta_get_ad_monthly_spend for accurate curves."]
+```
+
+**Contract: never emit empty data fields.** If `cohort_spend_by_month` cannot be populated even with the fallback, set it to `[]` and populate `data_warnings` explaining why. Do NOT leave the field missing or silently empty — the dashboard surfaces `data_warnings` to the user.
 
 **Verdict:**
 - HEALTHY: Launch volume stable or growing MoM. Cohort half-life > 6 weeks (1.5 months).
@@ -322,10 +347,12 @@ Store the CPA label as: `"{conversion_event} Cost ({conversion_label})"` — use
 ```json
 {
   "cohort_spend_by_month": [
-    {"month": "2025-01", "Jan launches": 0.0, "Feb launches": 0.0}
+    {"month": "2025-11", "Nov 2025 launches": 5234.10, "Oct 2025 launches": 3201.55},
+    {"month": "2025-12", "Nov 2025 launches": 4180.99, "Dec 2025 launches": 8120.30}
   ],
-  "monthly_launches": [{"month": "2025-01", "count": 0}],
-  "avg_cohort_half_life_weeks": 0.0
+  "monthly_launches": [{"month": "2025-11", "count": 4}, {"month": "2025-12", "count": 6}],
+  "avg_cohort_half_life_weeks": 5.2,
+  "data_warnings": []
 }
 ```
 
