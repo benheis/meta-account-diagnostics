@@ -287,6 +287,7 @@ Store the CPA label as: `"{conversion_event} Cost ({conversion_label})"` — use
 3. Compute % of total 90d spend per bucket.
 4. Compute `old_creative_spend_pct` = (Aging + Old) / total × 100.
 5. For monthly breakdown (chart): group `created_time` by month for the 3 visible months.
+6. For each (month, bucket) cell, collect the constituent ads sorted by spend desc. Keep the top 5 (constant `TOP_N_PER_BUCKET = 5`). Truncate ad names to 60 characters, appending `…` if truncated. If a bucket is empty for a given month, store `[]`.
 
 **Verdict:**
 - HEALTHY: old_creative_spend_pct < 40
@@ -299,9 +300,23 @@ Store the CPA label as: `"{conversion_event} Cost ({conversion_label})"` — use
   "monthly_spend_by_age": [
     {"month": "2025-01", "New (0-30d)": 0.0, "Mid (31-60d)": 0.0, "Aging (61-90d)": 0.0, "Old (90d+)": 0.0}
   ],
+  "monthly_top_ads_by_age": [
+    {
+      "month": "2025-01",
+      "buckets": {
+        "New (0-30d)":    [{"name": "Ad name (max 60 chars)", "spend": 0.0, "rank": 1}],
+        "Mid (31-60d)":   [],
+        "Aging (61-90d)": [],
+        "Old (90d+)":     []
+      }
+    }
+  ],
+  "top_ads_per_bucket": 5,
   "old_creative_spend_pct": 0.0
 }
 ```
+
+Note: `monthly_top_ads_by_age` is additive — the dashboard gracefully degrades to bucket totals only when this field is absent (for results.json files generated before this change).
 
 ---
 

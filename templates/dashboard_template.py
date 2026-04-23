@@ -118,17 +118,54 @@ def chart_creative_allocation(data: dict):
 
 def chart_old_creative(data: dict):
     monthly = data.get("monthly_spend_by_age", [])
+    top_ads = data.get("monthly_top_ads_by_age", [])  # absent in older results.json — degrade gracefully
+    top_n   = data.get("top_ads_per_bucket", 5)
     if not monthly:
         st.info("No age data available.")
         return
     df = pd.DataFrame(monthly)
     age_cols = [c for c in ["New (0-30d)", "Mid (31-60d)", "Aging (61-90d)", "Old (90d+)"] if c in df.columns]
-    fig = go.Figure()
     colors = {"New (0-30d)": "#1d4ed8", "Mid (31-60d)": "#60a5fa", "Aging (61-90d)": "#fcd34d", "Old (90d+)": "#d1d5db"}
+
+    top_by_month = {row["month"]: row.get("buckets", {}) for row in top_ads}
+
+    def render_top_list(month: str, bucket: str) -> str:
+        items = top_by_month.get(month, {}).get(bucket, [])
+        if not items:
+            return "<i>No ads in this bucket</i>"
+        return "<br>".join(
+            f"{it['rank']}. {it['name']} — ${it['spend']:,.0f}"
+            for it in items
+        )
+
+    fig = go.Figure()
     for col in reversed(age_cols):
-        fig.add_bar(name=col, x=df["month"], y=df[col], marker_color=colors.get(col, "#9ca3af"))
-    fig.update_layout(barmode="stack", title="", height=300, margin=dict(t=10, b=10),
-                      legend=dict(orientation="h", y=-0.2))
+        if top_by_month:
+            customdata = [[render_top_list(m, col)] for m in df["month"]]
+            hovertemplate = (
+                f"<b>{col}</b> · %{{x}}<br>"
+                f"Bucket spend: $%{{y:,.0f}}<br><br>"
+                f"<b>Top {top_n} ads by spend:</b><br>"
+                f"%{{customdata[0]}}<extra></extra>"
+            )
+        else:
+            customdata = None
+            hovertemplate = f"<b>{col}</b> · %{{x}}<br>Bucket spend: $%{{y:,.0f}}<extra></extra>"
+
+        fig.add_bar(
+            name=col,
+            x=df["month"],
+            y=df[col],
+            marker_color=colors.get(col, "#9ca3af"),
+            customdata=customdata,
+            hovertemplate=hovertemplate,
+        )
+
+    fig.update_layout(
+        barmode="stack", title="", height=300, margin=dict(t=10, b=10),
+        legend=dict(orientation="h", y=-0.2),
+        hoverlabel=dict(bgcolor="white", font_size=12, font_family="monospace", align="left"),
+    )
     st.plotly_chart(fig, use_container_width=True)
 
 
