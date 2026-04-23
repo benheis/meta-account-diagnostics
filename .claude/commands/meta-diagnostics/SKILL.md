@@ -160,11 +160,14 @@ Call `meta_get_ads` with `date_range: "last_90d"`
 Store as `ads_90d`.
 
 **Pull B — 6-month ad data** (Analyses 4, 5, 7):
-Call `meta_get_ads` with `date_range: "last_month"` for each of the last 6 months by computing since/until dates manually, OR call `meta_get_ads` with `date_range: "last_90d"` and use `created_time` to group into 6-month cohorts.
+Call `meta_get_ads` with `date_range: "last_6_months"`.
+Store as `ads_6m`.
 
-For the 6-month analysis, use `created_time` from `ads_90d` plus one broader pull:
-Call `meta_get_ads` with a custom `date_range` of "last_6_months" — if unsupported, run two pulls: `last_90d` and the 90 days before that (compute since/until as YYYY-MM-DD strings).
-Store all ads combined as `ads_6m` (deduplicate by `id`).
+If you need a custom window (e.g. a prior period), pass the date_range as a JSON string:
+`date_range: '{"since":"2025-10-24","until":"2026-01-22"}'`
+Do NOT pass the literal string `"custom"` or any other free-text value — that is not a valid preset and will return an error.
+
+After every `meta_get_ads` call, verify the response includes `since` and `until` fields that match the window you requested. If they don't match, stop and surface the error before proceeding with analysis.
 
 **Pull C — Monthly reach** (Analysis 6):
 Call `meta_get_monthly_reach` with `months: 13`
