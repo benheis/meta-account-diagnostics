@@ -365,33 +365,81 @@ Distribute each ad's lifetime spend from `ads_6m` evenly across its active month
 
 **Data used:** `ads_6m`
 
-**Calculations:**
-1. Compute `account_median_ad_spend` = median of all ad spend values.
-2. Motion winner threshold = max(10 × account_median_ad_spend, 500).
-3. User winner threshold = config `winner_threshold`.
-4. For each month: count launches, count winners (user def), count winners (Motion def).
-5. Monthly hit rate (user def) = winners_user / launches × 100.
-6. Determine spend tier from `account_overview` monthly spend:
-   - Micro: < 10000, Small: 10000-50000, Medium: 50000-200000, Large: 200000-1000000, Enterprise: 1000000+
-7. Load Motion benchmark hit rate for spend tier from `motion-benchmarks.json`.
-8. Classify: Volume problem if launches < Motion median for tier. Quality problem if launches ≥ median but hit rate < benchmark.
+**Config parameters used:**
+- `winner_top_percentile` (default 0.20) — an ad is a winner if its CPA falls in the top X% of the eligible pool
+- `winner_min_spend` (default 300) — lifetime spend floor to enter the eligible pool
+- `winner_benchmark_window_days` (default 90) — trailing window for computing the CPA threshold
+- `winner_threshold` — DEPRECATED. If present in config, emit a warning: "winner_threshold has no effect — Analysis 5 now uses CPA-percentile winner logic. Remove it from your config." Do not crash.
 
-**Verdict:**
-- HEALTHY: Hit rate ≥ Motion avg for tier, stable or improving.
-- WARNING: Hit rate 50-80% of Motion avg OR declining 2+ months.
-- CRITICAL: Hit rate < 50% of Motion avg OR zero winners in last 60 days.
+**Calculations:**
+
+Step 1 — Build the eligible pool:
+- Eligible ad = spend ≥ winner_min_spend AND has ≥ 1 attributed conversion_event in the benchmark window.
+- If fewer than 5 eligible ads exist: set verdict = INSUFFICIENT_DATA, skip to output.
+- Collect CPAs for all eligible ads. Sort ascending (lower = better).
+- `cpa_winner_threshold` = CPA at the (winner_top_percentile × N)-th index (e.g. top 20% of 50 ads → index 9 → the 10th-lowest CPA).
+- Store prior threshold: run same logic on ads from the 6-month-prior window (ads_6m shifted back) to get `cpa_winner_threshold_prior`. If unavailable, set to null.
+
+Step 2 — Score each ad:
+- `_is_winner` = spend ≥ winner_min_spend AND conversions > 0 AND CPA ≤ cpa_winner_threshold
+- `_is_recent_unscored` = launched in last 7 days (not enough delivery to judge)
+- `_is_high_spend_loser` = spend ≥ winner_min_spend AND conversions = 0 (wasted spend signal)
+
+Step 3 — Monthly bucketing (using created_time from ads_6m):
+For each calendar month M:
+- `launches` = count of all ads with created_time in M
+- `qualified_launches` = ads in M with spend ≥ winner_min_spend AND conversions > 0
+- `winners` = ads in M that are _is_winner
+- `underspent_launches` = launches − ads with spend ≥ winner_min_spend (didn't clear spend floor)
+- `recent_unscored` = ads in M that are _is_recent_unscored
+- `wasted_spend_count` = ads in M that are _is_high_spend_loser
+- `hit_rate_pct` = winners / qualified_launches × 100 (0 if qualified_launches = 0)
+
+Step 4 — Verdict (self-referential, not Motion-anchored):
+Target hit rate = winner_top_percentile × 100 (e.g. 20% for default 0.20).
+Last-3-month avg hit rate = mean of the 3 most recent complete months' hit_rate_pct.
+CPA threshold change = (cpa_winner_threshold − cpa_winner_threshold_prior) / cpa_winner_threshold_prior × 100 (if prior available).
+
+| Verdict | Conditions (any one triggers) |
+|---|---|
+| CRITICAL | Zero winners in last 60 days OR last-3-mo avg hit rate < 0.5 × target OR threshold up > 25% vs prior |
+| WARNING | Last-3-mo hit rate < 0.8 × target OR winner count declined 3 months in a row OR threshold up 10–25% vs prior |
+| HEALTHY | Hit rate within ±20% of target AND winner count stable/growing AND threshold flat or declining |
+| INSUFFICIENT_DATA | Fewer than 5 eligible ads in the benchmark window |
+
+Motion benchmark hit rate for the account's spend tier is kept in the data dict as `motion_avg_hit_rate_for_context` — include it in the report table as context only, not as a verdict driver.
+
+**Meaning / action copy:**
+- HEALTHY: "Producing winners at {hit_rate}% (target ~{target_pct}%). CPA bar is at ${threshold} — {flat/declining/rising} {pct_change}% vs 6 months ago."
+- WARNING — low hit rate: "Only {hit_rate}% of qualified launches cleared the ${threshold} CPA bar (target ~{target_pct}%). Concept quality slipping or losers being scaled prematurely. Audit kill criteria."
+- WARNING — bar drifting up: "Top-quintile CPA crept from ${threshold_prior} to ${threshold} ({pct_change}% worse). Best ads getting more expensive — check Analysis 6 (Rolling Reach) for saturation signals."
+- CRITICAL — zero winners: "No ads in 60 days cleared ${threshold} CPA with ≥ ${min_spend} spend. Halt current concepts; brief 5 net-new angles this week."
+- INSUFFICIENT_DATA: "Need ≥ 5 ads with ≥ ${min_spend} lifetime spend and ≥ 1 conversion in the last {window} days to compute a winner threshold. Run again after more data matures."
 
 **Dashboard data dict:**
 ```json
 {
   "monthly_slugging": [
-    {"month": "2025-01", "launches": 0, "winners_user": 0, "winners_motion": 0, "hit_rate_pct": 0.0}
+    {
+      "month": "2026-04",
+      "launches": 28,
+      "qualified_launches": 19,
+      "winners": 4,
+      "underspent_launches": 9,
+      "recent_unscored": 6,
+      "wasted_spend_count": 2,
+      "hit_rate_pct": 21.05
+    }
   ],
-  "motion_avg_hit_rate": 0.0,
-  "motion_top_quartile_hit_rate": 0.0,
-  "spend_tier": "Small",
-  "problem_type": "volume|quality|both|none",
-  "account_median_ad_spend": 0.0
+  "cpa_winner_threshold": 58.40,
+  "cpa_winner_threshold_prior": 71.20,
+  "cpa_winner_threshold_change_pct": -17.98,
+  "winner_top_percentile": 0.20,
+  "winner_min_spend": 300,
+  "winner_benchmark_window_days": 90,
+  "eligible_pool_size": 47,
+  "motion_avg_hit_rate_for_context": 8.13,
+  "spend_tier": "Medium"
 }
 ```
 

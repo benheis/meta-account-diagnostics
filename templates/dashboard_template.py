@@ -166,32 +166,63 @@ def chart_slugging_rate(data: dict):
     if not monthly:
         st.info("No slugging data available.")
         return
+
+    threshold     = data.get("cpa_winner_threshold")
+    threshold_prior = data.get("cpa_winner_threshold_prior")
+    threshold_chg = data.get("cpa_winner_threshold_change_pct")
+    top_pct       = data.get("winner_top_percentile", 0.20)
+    min_spend     = data.get("winner_min_spend", 300)
+    pool_size     = data.get("eligible_pool_size", 0)
+    target_rate   = top_pct * 100
+    motion_ctx    = data.get("motion_avg_hit_rate_for_context")
+
+    # CPA threshold header
+    if threshold:
+        direction = ""
+        if threshold_chg is not None:
+            if threshold_chg > 0:
+                direction = f" ↑ {threshold_chg:+.1f}% vs prior period"
+            elif threshold_chg < 0:
+                direction = f" ↓ {threshold_chg:.1f}% vs prior period"
+            else:
+                direction = " (flat vs prior period)"
+        st.caption(f"Winner bar: CPA ≤ ${threshold:.2f}{direction} · top {int(top_pct*100)}% of {pool_size} eligible ads (≥ ${min_spend} spend + ≥1 conversion)")
+
     df = pd.DataFrame(monthly)
     fig = go.Figure()
-    fig.add_bar(name="Launches", x=df["month"], y=df.get("launches", []),
-                marker_color="#93c5fd", offsetgroup=0)
-    fig.add_bar(name="Winners (user threshold)", x=df["month"], y=df.get("winners_user", []),
-                marker_color="#1d4ed8", offsetgroup=1)
-    fig.add_bar(name="Winners (Motion def.)", x=df["month"], y=df.get("winners_motion", []),
-                marker_color="#6366f1", offsetgroup=2)
+    fig.add_bar(name="All launches", x=df["month"], y=df.get("launches", []),
+                marker_color="#e2e8f0", offsetgroup=0)
+    fig.add_bar(name="Qualified (spend + conv.)", x=df["month"], y=df.get("qualified_launches", []),
+                marker_color="#93c5fd", offsetgroup=1)
+    fig.add_bar(name="Winners (CPA ≤ threshold)", x=df["month"], y=df.get("winners", []),
+                marker_color="#1d4ed8", offsetgroup=2)
+
     if "hit_rate_pct" in df.columns:
         fig.add_scatter(name="Hit Rate %", x=df["month"], y=df["hit_rate_pct"],
                         mode="lines+markers", yaxis="y2",
                         line=dict(color="#f59e0b", width=2))
-    motion_avg = data.get("motion_avg_hit_rate")
-    motion_top = data.get("motion_top_quartile_hit_rate")
-    if motion_avg:
-        fig.add_hline(y=motion_avg, line_dash="dash", line_color="#22c55e",
-                      annotation_text=f"Motion avg {motion_avg}%", yref="y2")
-    if motion_top:
-        fig.add_hline(y=motion_top, line_dash="dot", line_color="#a855f7",
-                      annotation_text=f"Top quartile {motion_top}%", yref="y2")
+
+    # Target hit rate reference line
+    fig.add_hline(y=target_rate, yref="y2", line_dash="dash", line_color="#22c55e",
+                  annotation_text=f"Target {target_rate:.0f}% (top {int(top_pct*100)}%ile)",
+                  annotation_position="top left")
+
     fig.update_layout(
-        barmode="group", title="", height=350, margin=dict(t=10, b=10),
+        barmode="group",
+        title=dict(text=f"Winners = CPA-percentile (top {int(top_pct*100)}% of eligible ads)", font=dict(size=13)),
+        height=370, margin=dict(t=40, b=10),
         yaxis2=dict(overlaying="y", side="right", title="Hit Rate %"),
         legend=dict(orientation="h", y=-0.25),
     )
     st.plotly_chart(fig, use_container_width=True)
+
+    # Wasted spend callout
+    if "wasted_spend_count" in df.columns and df["wasted_spend_count"].sum() > 0:
+        total_wasted = int(df["wasted_spend_count"].sum())
+        st.caption(f"⚠️ {total_wasted} ad(s) cleared the ${min_spend} spend floor but had zero conversions — wasted budget, not scored as winners or losers.")
+
+    if motion_ctx:
+        st.caption(f"For context: Motion {data.get('spend_tier','')} tier avg hit rate is {motion_ctx}% (their definition: spend ≥ 10× account median — not comparable to CPA-percentile method above).")
 
 
 def chart_rolling_reach(data: dict):
