@@ -526,6 +526,7 @@ Write `~/meta-diagnostics/results.json` with this structure:
   },
   "analyses": [
     {
+      "id": "test_and_learn",
       "title": "Test & Learn Spend Optimization",
       "verdict": "CRITICAL",
       "meaning": "...",
@@ -536,7 +537,17 @@ Write `~/meta-diagnostics/results.json` with this structure:
   ]
 }
 ```
-Include all 7 analyses in order.
+Include all 7 analyses in order. Each analysis MUST include an `id` field — the dashboard keys its chart renderer off this value, not the title. Use exactly these ids:
+
+| # | id | title (can be any human-readable string) |
+|---|---|---|
+| 1 | `test_and_learn` | Test & Learn Spend Optimization |
+| 2 | `creative_allocation` | Creative Allocation |
+| 3 | `old_creative` | Reliance on Old Creative |
+| 4 | `creative_churn` | Creative Churn |
+| 5 | `slugging_rate` | Production & Slugging Rate |
+| 6 | `rolling_reach` | Rolling Reach |
+| 7 | `volume_vs_spend` | Creative Volume vs. Spend (Motion 2026 Benchmarks) |
 
 ### Step 2: Write Markdown report
 

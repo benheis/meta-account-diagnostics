@@ -337,27 +337,28 @@ def main():
         st.caption(f"Run date: {run_date}")
 
     chart_fns = {
-        "Test & Learn Spend Optimization": chart_test_and_learn,
-        "Creative Allocation":             chart_creative_allocation,
-        "Reliance on Old Creative":        chart_old_creative,
-        "Creative Churn":                  chart_creative_churn,
-        "Production & Slugging Rate":      chart_slugging_rate,
-        "Rolling Reach":                   chart_rolling_reach,
-        "Creative Volume vs. Spend":       chart_volume_vs_spend,
+        "test_and_learn":      chart_test_and_learn,
+        "creative_allocation": chart_creative_allocation,
+        "old_creative":        chart_old_creative,
+        "creative_churn":      chart_creative_churn,
+        "slugging_rate":       chart_slugging_rate,
+        "rolling_reach":       chart_rolling_reach,
+        "volume_vs_spend":     chart_volume_vs_spend,
     }
 
     for a in analyses:
+        analysis_id = a.get("id", "")
         title   = a["title"]
         verdict = a["verdict"]
         meaning = a.get("meaning", "")
         action  = a.get("action", "")
         data    = a.get("data", {})
 
-        def make_chart_fn(t, d):
-            fn = chart_fns.get(t)
+        def make_chart_fn(aid, d):
+            fn = chart_fns.get(aid)
             return lambda: fn(d) if fn else st.info("Chart not available.")
 
-        analysis_card(title, verdict, meaning, action, make_chart_fn(title, data))
+        analysis_card(title, verdict, meaning, action, make_chart_fn(analysis_id, data))
 
     priority_action_stack(analyses)
 
