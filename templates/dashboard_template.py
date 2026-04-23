@@ -85,21 +85,32 @@ def chart_creative_allocation(data: dict):
     if not ads:
         st.info("No ad data available.")
         return
-    df = pd.DataFrame(ads).sort_values("cpa")
+    df = pd.DataFrame(ads)
     df["spend"] = pd.to_numeric(df.get("spend", 0), errors="coerce").fillna(0)
     df["tier"] = df.get("tier", "Other")
+    # Sort by spend descending — cpa ascending is wrong because cpa=0 (no conversions) sorts first
+    df = df[df["spend"] > 0].sort_values("spend", ascending=False)
 
+    top_n = 40
+    df_top = df.head(top_n)
     tier_color_map = {"Top 1%": "#a855f7", "Top 10%": "#6366f1", "Other": "#d1d5db"}
     fig = px.bar(
-        df.head(40), x="name", y="spend",
+        df_top, x="name", y="spend",
         color="tier", color_discrete_map=tier_color_map,
         labels={"name": "Ad", "spend": "Spend ($)", "tier": "Tier"},
-        title="",
+        title=f"Top {len(df_top)} ads by spend (of {len(df)} active in window)",
     )
-    fig.update_layout(xaxis_tickangle=-45, margin=dict(t=10, b=80), height=340, xaxis_showticklabels=False)
-    fifty_pct = df["spend"].sum() * 0.5
-    fig.add_hline(y=fifty_pct, line_dash="dot", line_color="#6b7280",
-                  annotation_text="50% spend line", annotation_position="top right")
+    fig.update_layout(xaxis_tickangle=-45, margin=dict(t=30, b=80), height=380, xaxis_showticklabels=False)
+
+    # Annotation: how many ads account for 50% of total spend (from full sorted list)
+    total_spend = df["spend"].sum()
+    cumulative = df["spend"].cumsum()
+    ads_to_50pct = int((cumulative <= total_spend * 0.5).sum()) + 1
+    fig.add_annotation(
+        xref="paper", yref="paper", x=0.99, y=0.95, showarrow=False,
+        text=f"<b>{ads_to_50pct} ads = 50% of spend</b>",
+        bgcolor="rgba(255,255,255,0.8)", bordercolor="#d1d5db", borderwidth=1,
+    )
     st.plotly_chart(fig, use_container_width=True)
 
 
