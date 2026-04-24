@@ -167,6 +167,12 @@ def chart_old_creative(data: dict):
         hoverlabel=dict(bgcolor="white", font_size=12, font_family="monospace", align="left"),
     )
     st.plotly_chart(fig, use_container_width=True)
+    st.caption(
+        "Each bar shows spend that ran during that calendar month, broken down by how old each ad was at that time. "
+        "An ad created in December appears in the New (0–30d) bucket for its December spend, "
+        "Mid (31–60d) bucket for its February spend, and so on. "
+        "The X-axis is the month spend occurred — not the month the ad launched."
+    )
 
 
 def chart_creative_churn(data: dict):
@@ -199,67 +205,90 @@ def chart_creative_churn(data: dict):
 
 
 def chart_slugging_rate(data: dict):
-    monthly = data.get("monthly_slugging", [])
-    if not monthly:
+    windows = data.get("windows", [])
+    if not windows:
         st.info("No slugging data available.")
         return
 
-    threshold     = data.get("cpa_winner_threshold")
-    threshold_prior = data.get("cpa_winner_threshold_prior")
-    threshold_chg = data.get("cpa_winner_threshold_change_pct")
-    top_pct       = data.get("winner_top_percentile", 0.20)
-    min_spend     = data.get("winner_min_spend", 300)
-    pool_size     = data.get("eligible_pool_size", 0)
-    target_rate   = top_pct * 100
-    motion_ctx    = data.get("motion_avg_hit_rate_for_context")
+    top_pct    = data.get("winner_top_percentile", 0.20)
+    min_spend  = data.get("winner_min_spend", 300)
+    window_d   = data.get("window_days", 60)
+    target_rate = top_pct * 100
+    motion_ctx  = data.get("motion_avg_hit_rate_for_context")
 
-    # CPA threshold header
-    if threshold:
-        direction = ""
-        if threshold_chg is not None:
-            if threshold_chg > 0:
-                direction = f" ↑ {threshold_chg:+.1f}% vs prior period"
-            elif threshold_chg < 0:
-                direction = f" ↓ {threshold_chg:.1f}% vs prior period"
-            else:
-                direction = " (flat vs prior period)"
-        st.caption(f"Winner bar: CPA ≤ ${threshold:.2f}{direction} · top {int(top_pct*100)}% of {pool_size} eligible ads (≥ ${min_spend} spend + ≥1 conversion)")
+    st.caption(
+        f"Winners = top {int(top_pct*100)}% CPA within each {window_d}-day cohort window "
+        f"(spend ≥ ${min_spend} + ≥1 conversion). "
+        "Each window's threshold is computed only from ads launched in that window — "
+        "older cohorts don't drag down the bar for newer ones."
+    )
 
-    df = pd.DataFrame(monthly)
+    df = pd.DataFrame(windows)
+    labels = df["label"].tolist()
+
+    hit_rates    = df["hit_rate_pct"].tolist() if "hit_rate_pct" in df.columns else [0] * len(df)
+    winner_spend = df["winner_spend"].tolist() if "winner_spend" in df.columns else [0] * len(df)
+    losing_spend = df["losing_qualified_spend"].tolist() if "losing_qualified_spend" in df.columns else [0] * len(df)
+    wasted_spend = df["wasted_spend"].tolist() if "wasted_spend" in df.columns else [0] * len(df)
+
     fig = go.Figure()
-    fig.add_bar(name="All launches", x=df["month"], y=df.get("launches", []),
-                marker_color="#e2e8f0", offsetgroup=0)
-    fig.add_bar(name="Qualified (spend + conv.)", x=df["month"], y=df.get("qualified_launches", []),
-                marker_color="#93c5fd", offsetgroup=1)
-    fig.add_bar(name="Winners (CPA ≤ threshold)", x=df["month"], y=df.get("winners", []),
-                marker_color="#1d4ed8", offsetgroup=2)
+    fig.add_bar(
+        name="Winner spend",
+        x=labels, y=winner_spend,
+        marker_color="#1d4ed8",
+        customdata=hit_rates,
+        hovertemplate="<b>%{x}</b><br>Winner spend: $%{y:,.0f}<br>Hit rate: %{customdata:.1f}%<extra></extra>",
+    )
+    fig.add_bar(
+        name="Qualified non-winner spend",
+        x=labels, y=losing_spend,
+        marker_color="#f59e0b",
+        hovertemplate="<b>%{x}</b><br>Non-winner qualified: $%{y:,.0f}<extra></extra>",
+    )
+    fig.add_bar(
+        name="Wasted spend (0 conversions)",
+        x=labels, y=wasted_spend,
+        marker_color="#ef4444",
+        hovertemplate="<b>%{x}</b><br>Wasted (0 conv.): $%{y:,.0f}<extra></extra>",
+    )
 
     if "hit_rate_pct" in df.columns:
-        fig.add_scatter(name="Hit Rate %", x=df["month"], y=df["hit_rate_pct"],
-                        mode="lines+markers", yaxis="y2",
-                        line=dict(color="#f59e0b", width=2))
+        fig.add_scatter(
+            name="Hit Rate %", x=labels, y=hit_rates,
+            mode="lines+markers", yaxis="y2",
+            line=dict(color="#7c3aed", width=2),
+            hovertemplate="<b>%{x}</b><br>Hit rate: %{y:.1f}%<extra></extra>",
+        )
 
-    # Target hit rate reference line
-    fig.add_hline(y=target_rate, yref="y2", line_dash="dash", line_color="#22c55e",
-                  annotation_text=f"Target {target_rate:.0f}% (top {int(top_pct*100)}%ile)",
-                  annotation_position="top left")
+    fig.add_hline(
+        y=target_rate, yref="y2", line_dash="dash", line_color="#22c55e",
+        annotation_text=f"Target {target_rate:.0f}%",
+        annotation_position="top left",
+    )
+
+    scoreable_rates = [r for r in hit_rates if r is not None]
+    y2_max = max(
+        max(scoreable_rates) * 1.3 if scoreable_rates else target_rate,
+        target_rate + 10,
+        30,
+    )
+    y2_max = min(y2_max, 100)
 
     fig.update_layout(
-        barmode="group",
-        title=dict(text=f"Winners = CPA-percentile (top {int(top_pct*100)}% of eligible ads)", font=dict(size=13)),
+        barmode="stack",
+        title=dict(text=f"Spend by outcome per {window_d}-day cohort window", font=dict(size=13)),
         height=370, margin=dict(t=40, b=10),
-        yaxis2=dict(overlaying="y", side="right", title="Hit Rate %"),
+        yaxis=dict(title="Spend ($)"),
+        yaxis2=dict(overlaying="y", side="right", title="Hit Rate %", range=[0, y2_max]),
         legend=dict(orientation="h", y=-0.25),
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # Wasted spend callout
-    if "wasted_spend_count" in df.columns and df["wasted_spend_count"].sum() > 0:
-        total_wasted = int(df["wasted_spend_count"].sum())
-        st.caption(f"⚠️ {total_wasted} ad(s) cleared the ${min_spend} spend floor but had zero conversions — wasted budget, not scored as winners or losers.")
-
     if motion_ctx:
-        st.caption(f"For context: Motion {data.get('spend_tier','')} tier avg hit rate is {motion_ctx}% (their definition: spend ≥ 10× account median — not comparable to CPA-percentile method above).")
+        st.caption(
+            f"For context: Motion {data.get('spend_tier', '')} tier avg hit rate is {motion_ctx}% "
+            "(their definition differs — not directly comparable to per-window CPA-percentile method above)."
+        )
 
 
 def chart_rolling_reach(data: dict):

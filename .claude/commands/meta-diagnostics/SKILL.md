@@ -177,6 +177,10 @@ Store as `monthly_reach`.
 Call `meta_get_account_overview` with `date_range: "last_90d"`
 Store as `account_overview`.
 
+**Pull E — Per-ad monthly spend** (Analyses 3 and 4):
+Call `meta_get_ad_monthly_spend` with `months: 6`
+Store as `ad_monthly_spend`.
+
 Tell the user: "Data pulled. Running 7 analyses..."
 
 ---
@@ -275,19 +279,19 @@ Store the CPA label as: `"{conversion_event} Cost ({conversion_label})"` — use
 
 ### Analysis 3: Reliance on Old Creative
 
-**Data used:** `ads_90d` — use `created_time` field
+**Data used:** `ad_monthly_spend` (Pull E)
 
 **Calculations:**
-1. For each ad, compute age in days = today - date(created_time).
-2. Bucket:
-   - New: 0-30 days
-   - Mid: 31-60 days
-   - Aging: 61-90 days
-   - Old: 90+ days
-3. Compute % of total 90d spend per bucket.
-4. Compute `old_creative_spend_pct` = (Aging + Old) / total × 100.
-5. For monthly breakdown (chart): group `created_time` by month for the 3 visible months.
-6. For each (month, bucket) cell, collect the constituent ads sorted by spend desc. Keep the top 5 (constant `TOP_N_PER_BUCKET = 5`). Truncate ad names to 60 characters, appending `…` if truncated. If a bucket is empty for a given month, store `[]`.
+1. From `ad_monthly_spend`, iterate over all (ad, month) pairs where the ad's spend in that month is > 0.
+2. For each pair, compute `age_at_month` = (first day of that calendar month − date(ad.`created_time`)).days.
+3. Assign age bucket based on `age_at_month`:
+   - New (0-30d): age_at_month ≤ 30
+   - Mid (31-60d): age_at_month 31–60
+   - Aging (61-90d): age_at_month 61–90
+   - Old (90d+): age_at_month > 90
+4. Accumulate spend per (calendar_month, bucket). Initialize each cell with a fresh `{k: 0.0 for k in BUCKET_KEYS}` — never use a shared mutable accumulator as the dict factory (doing so causes phantom spend to leak into newly-seen cells).
+5. Compute `old_creative_spend_pct` = sum of (Aging + Old) spend across all calendar months / total spend × 100.
+6. For each (month, bucket) cell, collect the constituent (ad, spend-in-that-month) pairs, sort by spend-in-that-month descending, keep top 5 (`TOP_N_PER_BUCKET = 5`). Truncate ad names to 60 characters, appending `…` if truncated. Empty cells → `[]`.
 
 **Verdict:**
 - HEALTHY: old_creative_spend_pct < 40
@@ -322,7 +326,7 @@ Note: `monthly_top_ads_by_age` is additive — the dashboard gracefully degrades
 
 ### Analysis 4: Creative Churn
 
-**Data used:** `meta_get_ad_monthly_spend(months=6)` — call this tool explicitly. It returns one entry per ad with a `monthly_spend` array of `{month, spend}` objects.
+**Data used:** `ad_monthly_spend` (Pull E — already fetched in Phase 3). Each entry has a `monthly_spend` array of `{month, spend}` objects.
 
 **Calculations:**
 
@@ -381,78 +385,79 @@ Distribute each ad's lifetime spend from `ads_6m` evenly across its active month
 **Data used:** `ads_6m`
 
 **Config parameters used:**
-- `winner_top_percentile` (default 0.20) — an ad is a winner if its CPA falls in the top X% of the eligible pool
+- `window_days` (default 60) — size of each rolling cohort window in days
+- `winner_top_percentile` (default 0.20) — an ad is a winner if its CPA falls in the top X% of its own window's eligible pool
 - `winner_min_spend` (default 300) — lifetime spend floor to enter the eligible pool
-- `winner_benchmark_window_days` (default 90) — trailing window for computing the CPA threshold
-- `winner_threshold` — DEPRECATED. If present in config, emit a warning: "winner_threshold has no effect — Analysis 5 now uses CPA-percentile winner logic. Remove it from your config." Do not crash.
+- `winner_threshold` — DEPRECATED. If present in config, emit a warning: "winner_threshold has no effect — Analysis 5 now uses per-window CPA-percentile scoring. Remove it from your config." Do not crash.
 
 **Calculations:**
 
-Step 1 — Build the eligible pool:
-- Eligible ad = spend ≥ winner_min_spend AND has ≥ 1 attributed conversion_event in the benchmark window.
-- If fewer than 5 eligible ads exist: set verdict = INSUFFICIENT_DATA, skip to output.
-- Collect CPAs for all eligible ads. Sort ascending (lower = better).
-- `cpa_winner_threshold` = CPA at the (winner_top_percentile × N)-th index (e.g. top 20% of 50 ads → index 9 → the 10th-lowest CPA).
-- Store prior threshold: run same logic on ads from the 6-month-prior window (ads_6m shifted back) to get `cpa_winner_threshold_prior`. If unavailable, set to null.
+Step 1 — Build rolling cohort windows:
+- Start: 6 months before today. End: today. Step: 30 days.
+- Produces ~5 windows over 180 days. Label each by its start and end months (e.g. "Oct–Dec '25").
+- Use `ads_6m` as the source for all ad data.
 
-Step 2 — Score each ad:
-- `_is_winner` = spend ≥ winner_min_spend AND conversions > 0 AND CPA ≤ cpa_winner_threshold
-- `_is_recent_unscored` = launched in last 7 days (not enough delivery to judge)
-- `_is_high_spend_loser` = spend ≥ winner_min_spend AND conversions = 0 (wasted spend signal)
+Step 2 — Score each window independently:
+For each window W = [window_start, window_end]:
+- `window_ads` = ads from `ads_6m` with `created_time` in [window_start, window_end]
+- `underspent` = window_ads with spend < winner_min_spend
+- `wasted` = window_ads with spend ≥ winner_min_spend AND conversions = 0
+- `qualified` = window_ads with spend ≥ winner_min_spend AND conversions > 0
+- If len(qualified) < 3: mark window `scoreable = false`, skip threshold; set hit_rate_pct = null.
+- Otherwise: sort qualified by CPA ascending. `cpa_threshold` = CPA at index `floor(winner_top_percentile × len(qualified))`.
+- `winners` = qualified ads with CPA ≤ cpa_threshold
+- `winner_spend` = sum of spend of winners
+- `losing_qualified_spend` = sum of spend of (qualified − winners)
+- `wasted_spend` = sum of spend of wasted
+- `hit_rate_pct` = len(winners) / len(qualified) × 100
 
-Step 3 — Monthly bucketing (using created_time from ads_6m):
-For each calendar month M:
-- `launches` = count of all ads with created_time in M
-- `qualified_launches` = ads in M with spend ≥ winner_min_spend AND conversions > 0
-- `winners` = ads in M that are _is_winner
-- `underspent_launches` = launches − ads with spend ≥ winner_min_spend (didn't clear spend floor)
-- `recent_unscored` = ads in M that are _is_recent_unscored
-- `wasted_spend_count` = ads in M that are _is_high_spend_loser
-- `hit_rate_pct` = winners / qualified_launches × 100 (0 if qualified_launches = 0)
-
-Step 4 — Verdict (self-referential, not Motion-anchored):
-Target hit rate = winner_top_percentile × 100 (e.g. 20% for default 0.20).
-Last-3-month avg hit rate = mean of the 3 most recent complete months' hit_rate_pct.
-CPA threshold change = (cpa_winner_threshold − cpa_winner_threshold_prior) / cpa_winner_threshold_prior × 100 (if prior available).
+Step 3 — Verdict (trend across windows, never cross-window threshold):
+- Collect `hit_rate_pct` values for all scoreable windows (where `scoreable = true`).
+- `recent_windows` = last 2 scoreable windows. `prior_windows` = 2 before those.
+- `recent_avg` = mean(recent_windows hit_rate_pct). `prior_avg` = mean(prior_windows) if ≥ 2 prior exist, else null.
+- `target_rate` = winner_top_percentile × 100.
 
 | Verdict | Conditions (any one triggers) |
 |---|---|
-| CRITICAL | Zero winners in last 60 days OR last-3-mo avg hit rate < 0.5 × target OR threshold up > 25% vs prior |
-| WARNING | Last-3-mo hit rate < 0.8 × target OR winner count declined 3 months in a row OR threshold up 10–25% vs prior |
-| HEALTHY | Hit rate within ±20% of target AND winner count stable/growing AND threshold flat or declining |
-| INSUFFICIENT_DATA | Fewer than 5 eligible ads in the benchmark window |
+| CRITICAL | Zero winners across the 2 most recent scoreable windows OR recent_avg < 0.5 × target_rate |
+| WARNING | recent_avg < 0.8 × target_rate OR (prior_avg is not null AND recent_avg < prior_avg × 0.8) |
+| HEALTHY | recent_avg ≥ 0.8 × target_rate AND (prior_avg is null OR recent_avg ≥ prior_avg × 0.8) |
+| INSUFFICIENT_DATA | Fewer than 2 scoreable windows |
 
 Motion benchmark hit rate for the account's spend tier is kept in the data dict as `motion_avg_hit_rate_for_context` — include it in the report table as context only, not as a verdict driver.
 
 **Meaning / action copy:**
-- HEALTHY: "Producing winners at {hit_rate}% (target ~{target_pct}%). CPA bar is at ${threshold} — {flat/declining/rising} {pct_change}% vs 6 months ago."
-- WARNING — low hit rate: "Only {hit_rate}% of qualified launches cleared the ${threshold} CPA bar (target ~{target_pct}%). Concept quality slipping or losers being scaled prematurely. Audit kill criteria."
-- WARNING — bar drifting up: "Top-quintile CPA crept from ${threshold_prior} to ${threshold} ({pct_change}% worse). Best ads getting more expensive — check Analysis 6 (Rolling Reach) for saturation signals."
-- CRITICAL — zero winners: "No ads in 60 days cleared ${threshold} CPA with ≥ ${min_spend} spend. Halt current concepts; brief 5 net-new angles this week."
-- INSUFFICIENT_DATA: "Need ≥ 5 ads with ≥ ${min_spend} lifetime spend and ≥ 1 conversion in the last {window} days to compute a winner threshold. Run again after more data matures."
+- HEALTHY: "Producing winners at {recent_avg:.0f}% hit rate (target ~{target_rate:.0f}%). Each cohort window evaluated against its own CPA bar — no cross-cohort dilution."
+- WARNING — low hit rate: "Only {recent_avg:.0f}% of qualified launches in recent windows cleared their cohort CPA bar (target ~{target_rate:.0f}%). Concept quality slipping or losers being scaled prematurely. Audit kill criteria."
+- WARNING — declining: "Hit rate dropped from {prior_avg:.0f}% to {recent_avg:.0f}% across recent windows. Review which concepts launched in {most recent window label} are underperforming."
+- CRITICAL — zero winners: "No winners in the last two cohort windows. Halt current concepts; brief 5 net-new angles this week."
+- INSUFFICIENT_DATA: "Need at least 2 scoreable windows (≥3 ads each with ≥ ${min_spend} spend and ≥1 conversion) to compute a trend. Run again after more data matures."
 
 **Dashboard data dict:**
 ```json
 {
-  "monthly_slugging": [
+  "windows": [
     {
-      "month": "2026-04",
-      "launches": 28,
-      "qualified_launches": 19,
-      "winners": 4,
-      "underspent_launches": 9,
-      "recent_unscored": 6,
-      "wasted_spend_count": 2,
-      "hit_rate_pct": 21.05
+      "label": "Oct–Dec '25",
+      "window_start": "2025-10-23",
+      "window_end": "2025-12-22",
+      "launches": 12,
+      "qualified": 8,
+      "winners": 2,
+      "wasted": 1,
+      "winner_spend": 45000.0,
+      "losing_qualified_spend": 22000.0,
+      "wasted_spend": 3500.0,
+      "hit_rate_pct": 25.0,
+      "cpa_threshold": 58.40,
+      "scoreable": true
     }
   ],
-  "cpa_winner_threshold": 58.40,
-  "cpa_winner_threshold_prior": 71.20,
-  "cpa_winner_threshold_change_pct": -17.98,
   "winner_top_percentile": 0.20,
   "winner_min_spend": 300,
-  "winner_benchmark_window_days": 90,
-  "eligible_pool_size": 47,
+  "window_days": 60,
+  "recent_avg_hit_rate": 22.5,
+  "prior_avg_hit_rate": 28.0,
   "motion_avg_hit_rate_for_context": 8.13,
   "spend_tier": "Medium"
 }
