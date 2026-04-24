@@ -15,6 +15,24 @@ import pandas as pd
 
 RESULTS_PATH = Path.home() / "meta-diagnostics" / "results.json"
 
+
+def _to_float(v) -> float:
+    """Parse a numeric value that may arrive as int, float, or a formatted string like '$216,029'."""
+    if isinstance(v, (int, float)):
+        return float(v)
+    if v is None:
+        return 0.0
+    return float(str(v).replace("$", "").replace(",", "").strip() or 0)
+
+
+def _fmt_usd(v: float) -> str:
+    """Format as USD currency. Uses 4 decimals for sub-penny values, 2 otherwise."""
+    if v is None:
+        return "—"
+    if abs(v) < 0.01:
+        return f"${v:,.4f}"
+    return f"${v:,.2f}"
+
 VERDICT_COLORS = {
     "HEALTHY":           "#22c55e",
     "WARNING":           "#f59e0b",
@@ -192,15 +210,31 @@ def chart_creative_churn(data: dict):
         return
     if warnings:
         st.caption(f"⚠️ {warnings[0]}")
-    df = pd.DataFrame(cohorts)
+    df = pd.DataFrame(cohorts).fillna(0)
+    months = df["month"].tolist()
     cohort_cols = [c for c in df.columns if c != "month"]
     fig = go.Figure()
     palette = px.colors.qualitative.Set2
     for i, col in enumerate(cohort_cols):
-        fig.add_scatter(name=col, x=df["month"], y=df[col], mode="lines",
-                        stackgroup="one", line=dict(color=palette[i % len(palette)]))
-    fig.update_layout(title="", height=320, margin=dict(t=10, b=10),
-                      legend=dict(orientation="h", y=-0.25))
+        series = df[col].tolist()
+        try:
+            first_idx = next(idx for idx, v in enumerate(series) if v > 0)
+        except StopIteration:
+            continue
+        fig.add_scatter(
+            name=col,
+            x=months[first_idx:],
+            y=series[first_idx:],
+            mode="lines",
+            stackgroup="one",
+            line=dict(color=palette[i % len(palette)]),
+        )
+    fig.update_layout(
+        title="", height=320, margin=dict(t=10, b=10),
+        legend=dict(orientation="h", y=-0.25),
+        xaxis=dict(type="category", title="Month"),
+        yaxis=dict(title="Spend (USD)"),
+    )
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -325,12 +359,17 @@ def chart_rolling_reach(data: dict):
     if prior_avg and recent_avg:
         threshold = prior_avg * 1.20
         fig.add_hline(y=threshold, yref="y2", line_dash="dot", line_color="#ef4444",
-                      annotation_text=f"Signal A threshold (${threshold:.3f})",
+                      annotation_text=f"Signal A threshold ({_fmt_usd(threshold)})",
                       annotation_position="top left")
 
     fig.update_layout(
         barmode="group", title="", height=360, margin=dict(t=10, b=10),
-        yaxis2=dict(overlaying="y", side="right", title="Cost / Net New Reach ($)"),
+        yaxis2=dict(
+            overlaying="y", side="right",
+            title="Cost / Net-New Reach (USD)",
+            tickprefix="$",
+            tickformat=",.2f",
+        ),
         legend=dict(orientation="h", y=-0.25),
     )
     st.plotly_chart(fig, use_container_width=True)
@@ -341,9 +380,9 @@ def chart_rolling_reach(data: dict):
     col1, col2 = st.columns(2)
     with col1:
         if signal_a is True:
-            st.error(f"Signal A: Cost rising — ${prior_avg:.3f} → ${recent_avg:.3f} (+{(recent_avg/prior_avg-1)*100:.0f}%)")
+            st.error(f"Signal A: Cost rising — {_fmt_usd(prior_avg)} → {_fmt_usd(recent_avg)} (+{(recent_avg/prior_avg-1)*100:.0f}%)")
         elif signal_a is False:
-            st.success(f"Signal A: Cost stable — ${prior_avg:.3f} → ${recent_avg:.3f}")
+            st.success(f"Signal A: Cost stable — {_fmt_usd(prior_avg)} → {_fmt_usd(recent_avg)}")
         else:
             st.info("Signal A: Insufficient data")
     with col2:
@@ -427,7 +466,7 @@ def chart_volume_vs_spend(data: dict):
             marker = " ← you" if row.get("is_current") else ""
             rows.append({
                 "Spend tier": f"{row['tier']} ({row['spend_range']}){marker}",
-                f"{vertical} median (monthly)": f"{row['motion_median_monthly']:.0f}" if row['motion_median_monthly'] else "—",
+                f"{vertical} median (monthly)": f"{row['median_monthly']:.0f}" if row.get('median_monthly') else "—",
             })
         st.table(rows)
 
@@ -482,7 +521,7 @@ def main():
     with st.sidebar:
         st.markdown("### Account Summary")
         overview = results.get("overview", {})
-        st.metric("Total Spend (90d)", f"${float(overview.get('spend', 0)):,.0f}")
+        st.metric("Total Spend (90d)", f"${_to_float(overview.get('spend', 0)):,.0f}")
         st.metric("Active Ads", overview.get("active_ads", "—"))
         st.metric("Date Range", overview.get("date_range", "last_90_days"))
         st.markdown("---")

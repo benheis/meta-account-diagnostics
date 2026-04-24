@@ -622,8 +622,8 @@ Write `~/meta-diagnostics/results.json` with this structure:
   "run_date": "YYYY-MM-DD",
   "config": { ...config values... },
   "overview": {
-    "spend": "...",
-    "active_ads": 0,
+    "spend": "216029.38",
+    "active_ads": 151,
     "date_range": "last_90_days"
   },
   "analyses": [
@@ -639,6 +639,9 @@ Write `~/meta-diagnostics/results.json` with this structure:
   ]
 }
 ```
+
+**Contract: `overview.spend` must be a raw numeric string with no currency symbol or commas** — e.g. `"216029.38"`, NOT `"$216,029"` or `"216,029.38 USD"`. The dashboard calls `float()` on this value directly and will crash on formatted strings.
+
 Include all 7 analyses in order. Each analysis MUST include an `id` field — the dashboard keys its chart renderer off this value, not the title. Use exactly these ids:
 
 | # | id | title (can be any human-readable string) |
