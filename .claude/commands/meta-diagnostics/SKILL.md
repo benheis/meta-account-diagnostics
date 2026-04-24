@@ -199,22 +199,49 @@ Store the CPA label as: `"{conversion_event} Cost ({conversion_label})"` — use
 
 ---
 
+### Shared Step — Build concept-level maps (run ONCE before any analysis)
+
+Meta creates a new `ad_id` with a new `created_time` every time an existing creative is duplicated into a new ad set. All analyses must operate on **creative concepts** (unique names), not raw `ad_id` rows. Before running any analysis, build the following two maps from `ads_6m`. Also build `concept_aggregates_90d` from `ads_90d` using the same logic (for A1 and A2).
+
+**Map 1 — `concept_aggregates`** (used by A1, A2, A5):
+For each unique ad name in `ads_6m`, sum `spend` and `conversions` across ALL `ad_id` rows sharing that name. Compute `cpa` from the sums (not mean of per-row CPAs). Record `first_seen` (earliest `created_time`) and `ad_id_count`.
+```
+concept_aggregates[name] = {
+  spend:        sum of spend across all ad_ids with this name,
+  conversions:  sum of conversions across all ad_ids with this name,
+  cpa:          spend / conversions  (0 if conversions = 0),
+  ad_id_count:  count of ad_id rows collapsed,
+  first_seen:   earliest created_time across all ad_ids with this name
+}
+```
+`concept_aggregates_90d` is built identically from `ads_90d`.
+
+**Map 2 — `concept_first_launch_months`** (used by A3, A4, A5, A7):
+For each unique ad name in `ads_6m`, record the earliest `created_time` calendar month (YYYY-MM). This is the concept's true launch month regardless of later duplications.
+```
+concept_first_launch_months[name] = earliest YYYY-MM of created_time across all ad_ids with that name
+```
+
+**Truncation caveat:** If a creative was first launched BEFORE the start of `ads_6m`, its earliest visible month will be incorrectly attributed as its launch month. Flag the earliest calendar month present in the data as `truncation_warning: true` in analyses that use `concept_first_launch_months`.
+
+---
+
 ### Analysis 1: Test & Learn Spend Optimization
 
-**Data used:** `ads_90d`
+**Data used:** `concept_aggregates_90d` (built from `ads_90d` in the Shared Step above)
 
 **Calculations:**
-1. For each ad, extract `spend` (float) and CPA = find `conversion_event` in `cost_per_action_type` array. If not found, use 0.
-2. Compute `account_median_cpa` = median CPA of all ads with CPA > 0.
-3. Compute `account_median_spend` = median spend of all ads.
-4. Zone each ad (evaluated in order; first match wins):
+1. For each concept in `concept_aggregates_90d`, use the aggregated `spend` and `cpa` fields. CPA is already computed from lifetime sums — do not re-derive it from individual ad rows.
+2. Compute `account_median_cpa` = median CPA of all concepts with CPA > 0.
+3. Compute `account_median_spend` = median spend of all concepts.
+4. Zone each concept (evaluated in order; first match wins):
    - Red: CPA > 2 × account_median_cpa AND spend > 500
-   - Purple: in the lowest-CPA 10% of ads **among ads with CPA > 0 AND conversions ≥ 1** by count. Ads with zero conversions are ineligible for Purple regardless of their recorded CPA.
-   - Green: everything else (including zero-conversion ads that don't meet Red criteria)
+   - Purple: in the lowest-CPA 10% of concepts **among concepts with CPA > 0 AND conversions ≥ 1** by count. Zero-conversion concepts are ineligible for Purple.
+   - Green: everything else
 5. Compute:
    - `red_spend_pct` = sum of Red zone spend / total spend × 100
    - `winner_spend_pct` = sum of Purple zone spend / total spend × 100
-   - `testing_budget_pct` = sum of spend on ads with spend < 500 / total spend × 100
+   - `testing_budget_pct` = sum of spend on concepts with spend < 500 / total spend × 100
 
 **Verdict:**
 - HEALTHY: winner_spend_pct > 40 AND testing_budget_pct between 10-20 AND red_spend_pct < 15
@@ -234,7 +261,7 @@ Store the CPA label as: `"{conversion_event} Cost ({conversion_label})"` — use
 **Dashboard data dict:**
 ```json
 {
-  "ads": [{"name": "...", "spend": 0.0, "cpa": 0.0, "zone": "Green|Red|Purple"}],
+  "ads": [{"name": "...", "spend": 0.0, "cpa": 0.0, "conversions": 0, "ad_id_count": 1, "zone": "Green|Red|Purple"}],
   "cpa_label": "Purchase Cost (paid subscription sign-up)",
   "account_median_cpa": 0.0,
   "red_spend_pct": 0.0,
@@ -247,21 +274,21 @@ Store the CPA label as: `"{conversion_event} Cost ({conversion_label})"` — use
 
 ### Analysis 2: Creative Allocation
 
-**Data used:** `ads_90d` (reuse from Analysis 1 — no new API call)
+**Data used:** `concept_aggregates_90d` (reuse from Analysis 1 — no new API call)
 
 **Calculations:**
-1. Separate ads into two pools:
-   - **Ranked pool**: CPA > 0 AND conversions ≥ 1. These are the only ads eligible for percentile tiers.
-   - **Unranked**: CPA = 0 or conversions = 0. Zero conversions means no performance signal — CPA = 0 is not "great CPA," it is no data. These ads are tagged "Other" and excluded from all percentile math.
+1. Separate concepts into two pools:
+   - **Ranked pool**: CPA > 0 AND conversions ≥ 1. The only concepts eligible for percentile tiers.
+   - **Unranked**: CPA = 0 or conversions = 0. Tagged "Other" and excluded from all percentile math.
 2. Rank the ranked pool by CPA ascending (lowest CPA = best).
 3. Identify top 1% by count (ceil) and top 10% by count — from the ranked pool only.
 4. Compute:
    - `top_1pct_spend_pct` = spend in top 1% / total spend × 100
    - `top_10pct_spend_pct` = spend in top 10% / total spend × 100
-5. Tag each ad: "Top 1%", "Top 10%", or "Other" (unranked ads are always "Other")
-6. Spend-weighted avg CPA = sum(spend × cpa) / sum(spend) — use all ads with spend > 0
+5. Tag each concept: "Top 1%", "Top 10%", or "Other" (unranked are always "Other")
+6. Spend-weighted avg CPA = sum(spend × cpa) / sum(spend) — all concepts with spend > 0
 7. Unweighted median CPA = median(cpa) of the ranked pool only
-8. `budget_waste_signal` = spend_weighted_avg_cpa - unweighted_median_cpa (positive = budget is on worse ads)
+8. `budget_waste_signal` = spend_weighted_avg_cpa - unweighted_median_cpa (positive = budget on worse ads)
 
 **Verdict:**
 - HEALTHY: top_10pct_spend_pct > 50
@@ -282,11 +309,13 @@ Store the CPA label as: `"{conversion_event} Cost ({conversion_label})"` — use
 
 ### Analysis 3: Reliance on Old Creative
 
-**Data used:** `ad_monthly_spend` (Pull E)
+**Data used:** `ad_monthly_spend` (Pull E) + `concept_first_launch_months` (Shared Step)
 
 **Calculations:**
 1. From `ad_monthly_spend`, iterate over all (ad, month) pairs where the ad's spend in that month is > 0.
-2. For each pair, compute `age_at_month` = (first day of that calendar month − date(ad.`created_time`)).days.
+2. For each pair, compute `age_at_month` using the **concept's** true first launch date, not the individual ad_id's `created_time`:
+   `age_at_month = (first day of that calendar month − date(concept_first_launch_months[ad.name])).days`
+   This ensures a creative duplicated into a new ad set in January from a September original is correctly aged 120+ days in January, not 0 days.
 3. Assign age bucket based on `age_at_month`:
    - New (0-30d): age_at_month ≤ 30
    - Mid (31-60d): age_at_month 31–60
@@ -329,17 +358,17 @@ Note: `monthly_top_ads_by_age` is additive — the dashboard gracefully degrades
 
 ### Analysis 4: Creative Churn
 
-**Data used:** `ad_monthly_spend` (Pull E — already fetched in Phase 3). Each entry has a `monthly_spend` array of `{month, spend}` objects.
+**Data used:** `ad_monthly_spend` (Pull E) + `concept_first_launch_months` (Shared Step)
 
 **Calculations:**
 
-Step 1 — Group ads into launch cohorts:
-- For each ad, extract launch month from `created_time` → YYYY-MM. This is the cohort key.
-- Build a dict: `cohorts = { "2025-11": [ad1, ad2, ...], "2025-12": [...], ... }`
+Step 1 — Group concepts into launch cohorts:
+- For each ad in `ad_monthly_spend`, use `concept_first_launch_months[ad.name]` as the cohort key (not `ad.created_time`). This correctly attributes all duplicates of a concept to the month it was first introduced.
+- Build a dict: `cohorts = { "2025-11": [name1, name2, ...], "2025-12": [...], ... }`
 
 Step 2 — Build `cohort_spend_by_month`:
 - Enumerate every calendar month M in the 6-month window.
-- For each cohort C launched on or before M, sum `monthly_spend[month == M].spend` across all ads in C.
+- For each cohort C launched on or before M, sum `monthly_spend[month == M].spend` across ALL ad_ids whose name belongs to C (aggregating spend across duplicates).
 - Output one row per calendar month:
   `{"month": "2025-11", "Nov 2025 launches": 5234.10, "Oct 2025 launches": 3201.55}`
 - Cohort column name format: `"{Mon YYYY} launches"` (e.g. "Nov 2025 launches").
@@ -352,7 +381,7 @@ Step 3 — Cohort half-life:
 - `avg_cohort_half_life_weeks` = mean half-life across all cohorts × 4.33.
 
 Step 4 — Monthly launch counts:
-- `monthly_launches` = for each month M, count of ads whose `created_time` falls in M.
+- `monthly_launches` = for each month M, count of unique concepts whose `concept_first_launch_months` value equals M. (Used as fallback chart when cohort spend curves are unavailable — counts concepts, not raw `ad_id` rows.)
 
 Step 5 — Launch trend:
 - Compare last 3 months' launch counts. Growing = each month higher than prior. Declining = each month lower. Flat = otherwise.
@@ -387,84 +416,84 @@ Distribute each ad's lifetime spend from `ads_6m` evenly across its active month
 
 ### Analysis 5: Production & Slugging Rate
 
-**Data used:** `ads_6m`
+**Data used:** `concept_aggregates` + `concept_first_launch_months` (Shared Step)
 
 **Config parameters used:**
-- `window_days` (default 60) — size of each rolling cohort window in days
-- `winner_top_percentile` (default 0.20) — an ad is a winner if its CPA falls in the top X% of its own window's eligible pool
-- `winner_min_spend` (default 300) — lifetime spend floor to enter the eligible pool
-- `winner_threshold` — DEPRECATED. If present in config, emit a warning: "winner_threshold has no effect — Analysis 5 now uses per-window CPA-percentile scoring. Remove it from your config." Do not crash.
+- `winner_top_percentile` (default 0.20) — top X% by CPA among converted concepts = winners
+- `winner_threshold`, `winner_min_spend`, `window_days` — DEPRECATED. If present in config, emit a warning and ignore. Do not crash.
 
 **Calculations:**
 
-Step 1 — Build rolling cohort windows:
-- Start: 6 months before today. End: today. Step: 30 days.
-- Produces ~5 windows over 180 days. Label each by its start and end months (e.g. "Oct–Dec '25").
-- Use `ads_6m` as the source for all ad data.
+Step 1 — Assign each concept its true launch month using `concept_first_launch_months`.
 
-Step 2 — Score each window independently:
-For each window W = [window_start, window_end]:
-- `window_ads` = ads from `ads_6m` with `created_time` in [window_start, window_end]
-- `underspent` = window_ads with spend < winner_min_spend
-- `wasted` = window_ads with spend ≥ winner_min_spend AND conversions = 0
-- `qualified` = window_ads with spend ≥ winner_min_spend AND conversions > 0
-- If len(qualified) < 3: mark window `scoreable = false`, skip threshold; set hit_rate_pct = null.
-- Otherwise: sort qualified by CPA ascending. `cpa_threshold` = CPA at index `floor(winner_top_percentile × len(qualified))`.
-- `winners` = qualified ads with CPA ≤ cpa_threshold
-- `winner_spend` = sum of spend of winners
-- `losing_qualified_spend` = sum of spend of (qualified − winners)
-- `wasted_spend` = sum of spend of wasted
-- `hit_rate_pct` = len(winners) / len(qualified) × 100
+Step 2 — Build calendar-month windows (6 months, non-overlapping, one per calendar month):
+Each window = one calendar month M. Assign each concept in `concept_aggregates` to its `first_launch_month`.
 
-Step 3 — Verdict (trend across windows, never cross-window threshold):
-- Collect `hit_rate_pct` values for all scoreable windows (where `scoreable = true`).
-- `recent_windows` = last 2 scoreable windows. `prior_windows` = 2 before those.
-- `recent_avg` = mean(recent_windows hit_rate_pct). `prior_avg` = mean(prior_windows) if ≥ 2 prior exist, else null.
-- `target_rate` = winner_top_percentile × 100.
+Step 3 — Score each window:
+```
+For each calendar month M:
+  concepts   = all concepts where first_launch_month == M
+  converted  = [c for c in concepts if c.conversions ≥ 1]
+  zero_conv  = [c for c in concepts if c.conversions == 0]
 
-| Verdict | Conditions (any one triggers) |
-|---|---|
-| CRITICAL | Zero winners across the 2 most recent scoreable windows OR recent_avg < 0.5 × target_rate |
-| WARNING | recent_avg < 0.8 × target_rate OR (prior_avg is not null AND recent_avg < prior_avg × 0.8) |
-| HEALTHY | recent_avg ≥ 0.8 × target_rate AND (prior_avg is null OR recent_avg ≥ prior_avg × 0.8) |
-| INSUFFICIENT_DATA | Fewer than 2 scoreable windows |
+  if len(concepts) < 3: scoreable = false; hit_rate = null
 
-Motion benchmark hit rate for the account's spend tier is kept in the data dict as `motion_avg_hit_rate_for_context` — include it in the report table as context only, not as a verdict driver.
+  elif not converted: hit_rate = 0.0; winners = []
+
+  else:
+    sort converted by CPA ascending
+    idx = floor(winner_top_percentile × len(converted))
+    cpa_threshold = converted[idx].cpa
+    winners = [c for c in converted if c.cpa ≤ cpa_threshold]
+    hit_rate = len(winners) / len(concepts) × 100
+```
+**The denominator is `len(concepts)` — ALL concepts launched that month, including zero-conversion ones.** No spend gate. Every concept the team put in market is a launch decision that counts.
+
+Step 4 — Verdict vs Motion benchmark (not tautological percentile target):
+```
+target = motion_avg_hit_rate_for_context  (e.g. 8.13% for Medium-tier Finance)
+recent_avg = mean(hit_rate of last 2 scoreable months)
+prior_avg  = mean(hit_rate of 2 months before that) if ≥ 2 prior exist, else null
+
+CRITICAL:          recent_avg < target × 0.5  OR  zero winners across last 2 scoreable months
+WARNING:           recent_avg < target × 0.8  OR  (prior_avg not null AND recent_avg < prior_avg × 0.8)
+HEALTHY:           recent_avg ≥ target × 0.8
+INSUFFICIENT_DATA: fewer than 2 scoreable months
+```
 
 **Meaning / action copy:**
-- HEALTHY: "Producing winners at {recent_avg:.0f}% hit rate (target ~{target_rate:.0f}%). Each cohort window evaluated against its own CPA bar — no cross-cohort dilution."
-- WARNING — low hit rate: "Only {recent_avg:.0f}% of qualified launches in recent windows cleared their cohort CPA bar (target ~{target_rate:.0f}%). Concept quality slipping or losers being scaled prematurely. Audit kill criteria."
-- WARNING — declining: "Hit rate dropped from {prior_avg:.0f}% to {recent_avg:.0f}% across recent windows. Review which concepts launched in {most recent window label} are underperforming."
-- CRITICAL — zero winners: "No winners in the last two cohort windows. Halt current concepts; brief 5 net-new angles this week."
-- INSUFFICIENT_DATA: "Need at least 2 scoreable windows (≥3 ads each with ≥ ${min_spend} spend and ≥1 conversion) to compute a trend. Run again after more data matures."
+- HEALTHY: "Producing winners at {recent_avg:.1f}% hit rate vs Motion {target:.1f}% benchmark. Hit rate stable or improving month-over-month."
+- WARNING — below benchmark: "Hit rate {recent_avg:.1f}% is below the Motion {target:.1f}% benchmark for your tier. More concepts launching with zero conversions than expected."
+- WARNING — declining: "Hit rate dropped from {prior_avg:.1f}% to {recent_avg:.1f}%. Review concepts launched in {recent month} — high throughput with low win rate."
+- CRITICAL — zero winners: "No winning concepts in the last two months. Halt current creative direction; brief 5 net-new angles this week."
+- INSUFFICIENT_DATA: "Need ≥3 concepts launched in at least 2 months to compute trend. Run again after more data matures."
 
 **Dashboard data dict:**
 ```json
 {
   "windows": [
     {
-      "label": "Oct–Dec '25",
-      "window_start": "2025-10-23",
-      "window_end": "2025-12-22",
-      "launches": 12,
-      "qualified": 8,
+      "month": "2026-01",
+      "label": "Jan 2026",
+      "is_partial_month": false,
+      "truncation_warning": false,
+      "concepts_total": 41,
+      "converted_count": 9,
+      "zero_conv_count": 32,
       "winners": 2,
-      "wasted": 1,
-      "winner_spend": 45000.0,
-      "losing_qualified_spend": 22000.0,
-      "wasted_spend": 3500.0,
-      "hit_rate_pct": 25.0,
-      "cpa_threshold": 58.40,
+      "hit_rate": 4.9,
+      "winner_cpa_threshold": 250.98,
+      "ad_id_count": 82,
+      "duplicate_pct": 50.0,
       "scoreable": true
     }
   ],
   "winner_top_percentile": 0.20,
-  "winner_min_spend": 300,
-  "window_days": 60,
-  "recent_avg_hit_rate": 22.5,
-  "prior_avg_hit_rate": 28.0,
-  "motion_avg_hit_rate_for_context": 8.13,
-  "spend_tier": "Medium"
+  "recent_avg_hit_rate": 16.25,
+  "prior_avg_hit_rate": 8.35,
+  "motion_benchmark": 8.13,
+  "spend_tier": "Medium",
+  "verdict_reference": "motion"
 }
 ```
 
@@ -551,17 +580,17 @@ Always include a one-liner in the report explaining the calculation method:
 
 ### Analysis 7: Creative Volume vs. Spend (Motion 2026 Benchmarks)
 
-**Data used:** Launch counts from `ads_6m`. Spend tier from Analysis 5.
+**Data used:** `concept_first_launch_months` (Shared Step). Spend tier from Analysis 5.
 
 **Calculations:**
-1. Count launches per calendar month from `ads_6m` using `created_time`. **Important:** Meta creates a new `ad_id` with a new `created_time` each time an existing ad is duplicated into a new ad set. These duplicates are counted as launches here. Launch counts may therefore overstate net-new creative output for accounts that scale via ad-set duplication.
-2. avg_monthly_launches = mean of last 3 months' launch counts.
+1. Count unique concepts launched per calendar month using `concept_first_launch_months`. Each concept is counted once — in its true first-launch month — regardless of how many `ad_id` duplicates exist in `ads_6m`. Do NOT count raw `ad_id` rows from `ads_6m.created_time`.
+2. avg_monthly_launches = mean of last 3 months' concept launch counts.
 3. Look up Motion median weekly volume for user's vertical + tier from `motion-benchmarks.json`.
    - If value is null (suppressed), fall back to `all_verticals_fallback` for that tier.
 4. Convert weekly to monthly: benchmark_weekly × 4.33.
 5. Top quartile monthly = top_quartile_weekly × 4.33.
 6. Compare: user launches vs median vs top quartile.
-7. Note: Motion median = 50th percentile (average account). Top quartile is the real competitive benchmark. Motion's count methodology likely reflects intentional creative tests, not ad-object duplications — add `"launch_count_includes_duplicates": true` to `data_warnings` so the dashboard can surface this caveat.
+7. Note: Motion median = 50th percentile (average account). Top quartile is the real competitive benchmark. Motion's count methodology reflects intentional creative tests, not ad-object duplications — concept-level counting here aligns with their methodology.
 
 **Verdict:**
 - HEALTHY: avg_monthly_launches ≥ Motion median monthly.
@@ -575,7 +604,7 @@ Also compute:
 - `tier_spend_range`: the human-readable range from `spend_tiers[tier]` in `motion-benchmarks.json`
 - `account_monthly_run_rate`: the account's average monthly spend over the 90d window (from `account_overview`)
 - `launch_window.months`: names of the 3 calendar months used for avg_monthly_launches (e.g. "Feb 2026", "Mar 2026", "Apr 2026 (MTD)")
-- `launch_window.monthly_counts`: the raw launch count for each of those 3 months
+- `launch_window.monthly_counts`: the concept-level launch count (unique concepts) for each of those 3 months
 
 **Dashboard data dict:**
 ```json
@@ -604,7 +633,7 @@ Also compute:
     {"tier": "Enterprise", "spend_range": "$1M+/month",        "median_monthly": 0.0, "is_current": false}
   ],
   "benchmark_source": "Motion 2026 Creative Benchmarks (550K+ ads, 6,000+ advertisers, Sep 2025–Jan 2026)",
-  "data_warnings": ["Launch counts include ad-set duplicates — Meta creates a new ad_id each time an existing ad is duplicated into a new ad set. Your launch count may overstate net-new creative output if your account scales via duplication."]
+  "data_warnings": []
 }
 ```
 

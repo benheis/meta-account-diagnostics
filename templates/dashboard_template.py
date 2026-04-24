@@ -85,17 +85,26 @@ def chart_test_and_learn(data: dict):
     df["spend"] = pd.to_numeric(df.get("spend", 0), errors="coerce").fillna(0)
     df["cpa"] = pd.to_numeric(df.get("cpa", 0), errors="coerce").fillna(0)
     df["zone"] = df.get("zone", "Green")
+    # Guard: older results.json may not include conversions/ad_id_count
+    if "conversions" not in df.columns:
+        df["conversions"] = 1
+    else:
+        df["conversions"] = pd.to_numeric(df["conversions"], errors="coerce").fillna(1).clip(lower=1)
+    if "ad_id_count" not in df.columns:
+        df["ad_id_count"] = 1
 
     zone_color_map = {"Red": "#ef4444", "Green": "#22c55e", "Purple": "#a855f7"}
     fig = px.scatter(
         df, x="spend", y="cpa", color="zone",
         color_discrete_map=zone_color_map,
-        hover_data=["name"],
+        size="conversions",
+        size_max=24,
+        hover_data={"name": True, "conversions": ":.0f", "ad_id_count": True, "spend": ":.0f", "cpa": ":.0f"},
         labels={"spend": "Lifetime Spend ($)", "cpa": data.get("cpa_label", "CPA ($)"), "zone": "Zone"},
         log_x=True,
         title="",
     )
-    fig.update_traces(marker=dict(size=9, opacity=0.8))
+    fig.update_traces(marker=dict(opacity=0.8))
     fig.update_layout(margin=dict(t=10, b=10), height=320)
     st.plotly_chart(fig, use_container_width=True)
 
@@ -244,85 +253,95 @@ def chart_slugging_rate(data: dict):
         st.info("No slugging data available.")
         return
 
-    top_pct    = data.get("winner_top_percentile", 0.20)
-    min_spend  = data.get("winner_min_spend", 300)
-    window_d   = data.get("window_days", 60)
-    target_rate = top_pct * 100
-    motion_ctx  = data.get("motion_avg_hit_rate_for_context")
+    top_pct        = data.get("winner_top_percentile", 0.20)
+    motion_bmark   = data.get("motion_benchmark")
+    verdict_ref    = data.get("verdict_reference", "motion")
+    spend_tier     = data.get("spend_tier", "")
+
+    scoreable = [w for w in windows if w.get("scoreable", True)]
 
     st.caption(
-        f"Winners = top {int(top_pct*100)}% CPA within each {window_d}-day cohort window "
-        f"(spend ≥ ${min_spend} + ≥1 conversion). "
-        "Each window's threshold is computed only from ads launched in that window — "
-        "older cohorts don't drag down the bar for newer ones."
+        f"Hit rate = winners ÷ concepts launched. "
+        f"Each unique creative name counted once; winners = top {int(top_pct*100)}% CPA "
+        "among concepts with ≥1 conversion."
     )
 
     df = pd.DataFrame(windows)
     labels = df["label"].tolist()
 
-    hit_rates    = df["hit_rate_pct"].tolist() if "hit_rate_pct" in df.columns else [0] * len(df)
-    winner_spend = df["winner_spend"].tolist() if "winner_spend" in df.columns else [0] * len(df)
-    losing_spend = df["losing_qualified_spend"].tolist() if "losing_qualified_spend" in df.columns else [0] * len(df)
-    wasted_spend = df["wasted_spend"].tolist() if "wasted_spend" in df.columns else [0] * len(df)
+    winners_ct   = df["winners"].tolist()          if "winners"       in df.columns else [0] * len(df)
+    converted_ct = df["converted_count"].tolist()  if "converted_count" in df.columns else [0] * len(df)
+    zero_ct      = df["zero_conv_count"].tolist()  if "zero_conv_count" in df.columns else [0] * len(df)
+    hit_rates    = df["hit_rate"].tolist()         if "hit_rate"      in df.columns else [0] * len(df)
+
+    non_winner_ct = [max(c - w, 0) for c, w in zip(converted_ct, winners_ct)]
 
     fig = go.Figure()
     fig.add_bar(
-        name="Winner spend",
-        x=labels, y=winner_spend,
-        marker_color="#1d4ed8",
-        customdata=hit_rates,
-        hovertemplate="<b>%{x}</b><br>Winner spend: $%{y:,.0f}<br>Hit rate: %{customdata:.1f}%<extra></extra>",
+        name="Winners",
+        x=labels, y=winners_ct,
+        marker_color="#22c55e",
+        hovertemplate="<b>%{x}</b><br>Winners: %{y}<extra></extra>",
     )
     fig.add_bar(
-        name="Qualified non-winner spend",
-        x=labels, y=losing_spend,
+        name="Converted (non-winner)",
+        x=labels, y=non_winner_ct,
         marker_color="#f59e0b",
-        hovertemplate="<b>%{x}</b><br>Non-winner qualified: $%{y:,.0f}<extra></extra>",
+        hovertemplate="<b>%{x}</b><br>Converted non-winner: %{y}<extra></extra>",
     )
     fig.add_bar(
-        name="Wasted spend (0 conversions)",
-        x=labels, y=wasted_spend,
+        name="Zero conversions",
+        x=labels, y=zero_ct,
         marker_color="#ef4444",
-        hovertemplate="<b>%{x}</b><br>Wasted (0 conv.): $%{y:,.0f}<extra></extra>",
+        hovertemplate="<b>%{x}</b><br>Zero conversions: %{y}<extra></extra>",
     )
 
-    if "hit_rate_pct" in df.columns:
-        fig.add_scatter(
-            name="Hit Rate %", x=labels, y=hit_rates,
-            mode="lines+markers", yaxis="y2",
-            line=dict(color="#7c3aed", width=2),
-            hovertemplate="<b>%{x}</b><br>Hit rate: %{y:.1f}%<extra></extra>",
+    fig.add_scatter(
+        name="Hit Rate %", x=labels, y=hit_rates,
+        mode="lines+markers", yaxis="y2",
+        line=dict(color="#7c3aed", width=2),
+        hovertemplate="<b>%{x}</b><br>Hit rate: %{y:.1f}%<extra></extra>",
+    )
+
+    if motion_bmark is not None:
+        fig.add_hline(
+            y=motion_bmark, yref="y2", line_dash="dash", line_color="#0ea5e9",
+            annotation_text=f"Motion {spend_tier} benchmark ({motion_bmark:.1f}%)",
+            annotation_position="top left",
         )
 
-    fig.add_hline(
-        y=target_rate, yref="y2", line_dash="dash", line_color="#22c55e",
-        annotation_text=f"Target {target_rate:.0f}%",
-        annotation_position="top left",
-    )
-
-    scoreable_rates = [r for r in hit_rates if r is not None]
+    scoreable_rates = [w["hit_rate"] for w in scoreable if w.get("hit_rate") is not None]
+    ref_rate = motion_bmark if motion_bmark is not None else top_pct * 100
     y2_max = max(
-        max(scoreable_rates) * 1.3 if scoreable_rates else target_rate,
-        target_rate + 10,
-        30,
+        max(scoreable_rates) * 1.3 if scoreable_rates else ref_rate,
+        ref_rate + 5,
+        20,
     )
     y2_max = min(y2_max, 100)
 
     fig.update_layout(
         barmode="stack",
-        title=dict(text=f"Spend by outcome per {window_d}-day cohort window", font=dict(size=13)),
-        height=370, margin=dict(t=40, b=10),
-        yaxis=dict(title="Spend ($)"),
+        title="",
+        height=370, margin=dict(t=10, b=10),
+        yaxis=dict(title="Concepts launched"),
         yaxis2=dict(overlaying="y", side="right", title="Hit Rate %", range=[0, y2_max]),
         legend=dict(orientation="h", y=-0.25),
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    if motion_ctx:
-        st.caption(
-            f"For context: Motion {data.get('spend_tier', '')} tier avg hit rate is {motion_ctx}% "
-            "(their definition differs — not directly comparable to per-window CPA-percentile method above)."
-        )
+    # Summary table
+    if scoreable:
+        rows = []
+        for w in scoreable:
+            rows.append({
+                "Month": w.get("label", w.get("month", "")),
+                "Concepts": w.get("concepts_total", ""),
+                "Converted": w.get("converted_count", ""),
+                "Wasted": w.get("zero_conv_count", ""),
+                "Winners": w.get("winners", ""),
+                "Hit Rate": f"{w['hit_rate']:.1f}%" if w.get("hit_rate") is not None else "—",
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
 def chart_rolling_reach(data: dict):
