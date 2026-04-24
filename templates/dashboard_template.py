@@ -414,6 +414,10 @@ def chart_volume_vs_spend(data: dict):
         st.caption("ⓘ Top-quartile bar is cross-vertical — Motion doesn't publish vertical-level quartiles.")
     st.caption(f"Source: {bench_source}")
 
+    warnings = data.get("data_warnings", [])
+    for w in warnings:
+        st.caption(f"⚠️ {w}")
+
     # Tier reference table
     tier_table = data.get("tier_benchmark_table", [])
     if tier_table:

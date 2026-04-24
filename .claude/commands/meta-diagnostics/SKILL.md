@@ -207,10 +207,10 @@ Store the CPA label as: `"{conversion_event} Cost ({conversion_label})"` — use
 1. For each ad, extract `spend` (float) and CPA = find `conversion_event` in `cost_per_action_type` array. If not found, use 0.
 2. Compute `account_median_cpa` = median CPA of all ads with CPA > 0.
 3. Compute `account_median_spend` = median spend of all ads.
-4. Zone each ad:
+4. Zone each ad (evaluated in order; first match wins):
    - Red: CPA > 2 × account_median_cpa AND spend > 500
-   - Purple: in the lowest-CPA 10% of ads by count
-   - Green: everything else
+   - Purple: in the lowest-CPA 10% of ads **among ads with CPA > 0 AND conversions ≥ 1** by count. Ads with zero conversions are ineligible for Purple regardless of their recorded CPA.
+   - Green: everything else (including zero-conversion ads that don't meet Red criteria)
 5. Compute:
    - `red_spend_pct` = sum of Red zone spend / total spend × 100
    - `winner_spend_pct` = sum of Purple zone spend / total spend × 100
@@ -250,15 +250,18 @@ Store the CPA label as: `"{conversion_event} Cost ({conversion_label})"` — use
 **Data used:** `ads_90d` (reuse from Analysis 1 — no new API call)
 
 **Calculations:**
-1. Rank all ads by CPA ascending (lowest CPA = best).
-2. Identify top 1% by count (ceil), top 10% by count.
-3. Compute:
+1. Separate ads into two pools:
+   - **Ranked pool**: CPA > 0 AND conversions ≥ 1. These are the only ads eligible for percentile tiers.
+   - **Unranked**: CPA = 0 or conversions = 0. Zero conversions means no performance signal — CPA = 0 is not "great CPA," it is no data. These ads are tagged "Other" and excluded from all percentile math.
+2. Rank the ranked pool by CPA ascending (lowest CPA = best).
+3. Identify top 1% by count (ceil) and top 10% by count — from the ranked pool only.
+4. Compute:
    - `top_1pct_spend_pct` = spend in top 1% / total spend × 100
    - `top_10pct_spend_pct` = spend in top 10% / total spend × 100
-4. Tag each ad: "Top 1%", "Top 10%", or "Other"
-5. Spend-weighted avg CPA = sum(spend × cpa) / sum(spend)
-6. Unweighted median CPA = median(cpa)
-7. `budget_waste_signal` = spend_weighted_avg_cpa - unweighted_median_cpa (positive = budget is on worse ads)
+5. Tag each ad: "Top 1%", "Top 10%", or "Other" (unranked ads are always "Other")
+6. Spend-weighted avg CPA = sum(spend × cpa) / sum(spend) — use all ads with spend > 0
+7. Unweighted median CPA = median(cpa) of the ranked pool only
+8. `budget_waste_signal` = spend_weighted_avg_cpa - unweighted_median_cpa (positive = budget is on worse ads)
 
 **Verdict:**
 - HEALTHY: top_10pct_spend_pct > 50
@@ -343,7 +346,9 @@ Step 2 — Build `cohort_spend_by_month`:
 - Only include cohorts that have non-zero spend in at least one month.
 
 Step 3 — Cohort half-life:
-- For each cohort C: find its peak spend month. Find the first subsequent month where spend drops below 50% of peak. Half-life = distance in months between peak and that month (minimum 1).
+- For each cohort C: find its peak spend month. Find the first subsequent month where spend drops below 50% of peak.
+  - If such a month is found: half-life = distance in months between peak and that month (minimum 1).
+  - If spend never drops below 50% of peak within the data window: half-life = data_window_months (the cohort is still active). Flag it as `still_active: true` in the per-cohort data. Include it in the average — treating still-active cohorts as having a very long half-life is the correct interpretation.
 - `avg_cohort_half_life_weeks` = mean half-life across all cohorts × 4.33.
 
 Step 4 — Monthly launch counts:
@@ -549,13 +554,14 @@ Always include a one-liner in the report explaining the calculation method:
 **Data used:** Launch counts from `ads_6m`. Spend tier from Analysis 5.
 
 **Calculations:**
-1. avg_monthly_launches = mean of last 3 months' launch counts.
-2. Look up Motion median weekly volume for user's vertical + tier from `motion-benchmarks.json`.
+1. Count launches per calendar month from `ads_6m` using `created_time`. **Important:** Meta creates a new `ad_id` with a new `created_time` each time an existing ad is duplicated into a new ad set. These duplicates are counted as launches here. Launch counts may therefore overstate net-new creative output for accounts that scale via ad-set duplication.
+2. avg_monthly_launches = mean of last 3 months' launch counts.
+3. Look up Motion median weekly volume for user's vertical + tier from `motion-benchmarks.json`.
    - If value is null (suppressed), fall back to `all_verticals_fallback` for that tier.
-3. Convert weekly to monthly: benchmark_weekly × 4.33.
-4. Top quartile monthly = top_quartile_weekly × 4.33.
-5. Compare: user launches vs median vs top quartile.
-6. Note: Motion median = 50th percentile (average account). Top quartile is the real competitive benchmark.
+4. Convert weekly to monthly: benchmark_weekly × 4.33.
+5. Top quartile monthly = top_quartile_weekly × 4.33.
+6. Compare: user launches vs median vs top quartile.
+7. Note: Motion median = 50th percentile (average account). Top quartile is the real competitive benchmark. Motion's count methodology likely reflects intentional creative tests, not ad-object duplications — add `"launch_count_includes_duplicates": true` to `data_warnings` so the dashboard can surface this caveat.
 
 **Verdict:**
 - HEALTHY: avg_monthly_launches ≥ Motion median monthly.
@@ -597,7 +603,8 @@ Also compute:
     {"tier": "Large",      "spend_range": "$200K–$1M/month",   "median_monthly": 0.0, "is_current": false},
     {"tier": "Enterprise", "spend_range": "$1M+/month",        "median_monthly": 0.0, "is_current": false}
   ],
-  "benchmark_source": "Motion 2026 Creative Benchmarks (550K+ ads, 6,000+ advertisers, Sep 2025–Jan 2026)"
+  "benchmark_source": "Motion 2026 Creative Benchmarks (550K+ ads, 6,000+ advertisers, Sep 2025–Jan 2026)",
+  "data_warnings": ["Launch counts include ad-set duplicates — Meta creates a new ad_id each time an existing ad is duplicated into a new ad set. Your launch count may overstate net-new creative output if your account scales via duplication."]
 }
 ```
 
