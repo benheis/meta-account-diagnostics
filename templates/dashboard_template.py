@@ -33,6 +33,11 @@ def _fmt_usd(v: float) -> str:
         return f"${v:,.4f}"
     return f"${v:,.2f}"
 
+
+def _safe_md(text: str) -> str:
+    """Escape dollar signs so Streamlit doesn't render them as MathJax/LaTeX."""
+    return text.replace("$", "\\$")
+
 VERDICT_COLORS = {
     "HEALTHY":           "#22c55e",
     "WARNING":           "#f59e0b",
@@ -71,8 +76,8 @@ def analysis_card(title: str, verdict: str, meaning: str, action: str, chart_fn)
 </div>
 """, unsafe_allow_html=True)
     chart_fn()
-    st.markdown(f"**What it means:** {meaning}")
-    st.markdown(f"**Action:** {action}")
+    st.markdown(f"**What it means:** {_safe_md(meaning)}")
+    st.markdown(f"**Action:** {_safe_md(action)}")
     st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -93,20 +98,92 @@ def chart_test_and_learn(data: dict):
     if "ad_id_count" not in df.columns:
         df["ad_id_count"] = 1
 
-    zone_color_map = {"Red": "#ef4444", "Green": "#22c55e", "Purple": "#a855f7"}
+    zone_color_map = {"Red": "#ef4444", "Green": "#22c55e", "Purple": "#a855f7", "Unzoned": "#9ca3af"}
+    thresholds  = data.get("box_thresholds", {})
+    zone_conc   = data.get("zone_concentration", {})
+
+    # Concentration cards (above scatter) — only rendered when box_thresholds present
+    if thresholds and zone_conc:
+        zone_display = [
+            ("purple", "#a855f7", "Purple — Scale", "high spend · low CPA"),
+            ("green",  "#22c55e", "Green — Test",   "testing zone"),
+            ("red",    "#ef4444", "Red — Kill",     "scaled losers"),
+        ]
+        cols = st.columns(3)
+        for col, (zone_key, color, label, sublabel) in zip(cols, zone_display):
+            z = zone_conc.get(zone_key, {})
+            with col:
+                st.markdown(
+                    f"<span style='color:{color};font-size:18px'>●</span> **{label}**",
+                    unsafe_allow_html=True,
+                )
+                st.caption(sublabel)
+                st.markdown(
+                    f"**{z.get('count', 0)} concepts** · "
+                    f"**{z.get('spend_pct', 0):.0f}% of spend** · "
+                    f"**{z.get('conversions_pct', 0):.0f}% of conv**"
+                )
+
     fig = px.scatter(
         df, x="spend", y="cpa", color="zone",
         color_discrete_map=zone_color_map,
-        size="conversions",
-        size_max=24,
         hover_data={"name": True, "conversions": ":.0f", "ad_id_count": True, "spend": ":.0f", "cpa": ":.0f"},
         labels={"spend": "Lifetime Spend ($)", "cpa": data.get("cpa_label", "CPA ($)"), "zone": "Zone"},
         log_x=True,
         title="",
     )
-    fig.update_traces(marker=dict(opacity=0.8))
-    fig.update_layout(margin=dict(t=10, b=10), height=320)
+    fig.update_traces(marker=dict(size=10, opacity=0.75))
+
+    # Zone rectangles + median line — only rendered when box_thresholds present
+    if thresholds:
+        testing_max = thresholds.get("testing_max_spend", 0)
+        scaled_min  = thresholds.get("scaled_min_spend", 0)
+        median_cpa  = thresholds.get("median_cpa", 0)
+        red_cpa     = median_cpa * thresholds.get("red_cpa_multiple", 2.0)
+        x_max       = df["spend"].max() * 3 if not df.empty else scaled_min * 10
+        y_max       = df["cpa"].max() * 1.4 if not df.empty else red_cpa * 2
+
+        if scaled_min > 0 and median_cpa > 0:
+            # Green testing box (x0=1 is log-safe floor)
+            fig.add_shape(type="rect", x0=1, x1=max(testing_max, 1), y0=0, y1=median_cpa,
+                          fillcolor="#22c55e", opacity=0.06, line_width=0, layer="below")
+            fig.add_annotation(x=1, y=median_cpa * 0.5, xanchor="left",
+                               text="GREEN — graduate", font=dict(color="#15803d", size=10),
+                               showarrow=False)
+            # Purple winner box
+            fig.add_shape(type="rect", x0=scaled_min, x1=x_max, y0=0, y1=median_cpa,
+                          fillcolor="#a855f7", opacity=0.09, line_width=0, layer="below")
+            fig.add_annotation(x=scaled_min, y=median_cpa * 0.1, xanchor="left",
+                               text="PURPLE — feed", font=dict(color="#7e22ce", size=10),
+                               showarrow=False)
+            # Red loser box
+            fig.add_shape(type="rect", x0=testing_max, x1=x_max, y0=red_cpa, y1=y_max,
+                          fillcolor="#ef4444", opacity=0.09, line_width=0, layer="below")
+            fig.add_annotation(x=testing_max, y=y_max * 0.9, xanchor="left",
+                               text="RED — kill", font=dict(color="#b91c1c", size=10),
+                               showarrow=False)
+            # Median CPA reference line
+            fig.add_hline(y=median_cpa, line_dash="dot", line_color="#6b7280",
+                          annotation_text=f"Median CPA (${median_cpa:,.0f})",
+                          annotation_position="bottom right")
+
+    fig.update_layout(margin=dict(t=10, b=10), height=360)
     st.plotly_chart(fig, use_container_width=True)
+
+    # Framework caption (below scatter)
+    if thresholds:
+        testing_max = thresholds.get("testing_max_spend", 0)
+        scaled_min  = thresholds.get("scaled_min_spend", 0)
+        median_cpa  = thresholds.get("median_cpa", 0)
+        st.caption(
+            _safe_md(
+                f"Three-Box Framework: Purple = high-spend, low-CPA scaled winners (≥ ${scaled_min:,.0f} spend, CPA ≤ ${median_cpa:,.0f} median) — feed them. "
+                f"Green = testing zone (< ${testing_max:,.0f} spend) — graduate winners, kill losers. "
+                f"Red = scaled losers (≥ ${testing_max:,.0f} spend, CPA ≥ 2× median) — kill them. "
+                "Thresholds auto-calibrated to this account (P25/P75 of concept spend). "
+                "To override: tell the AI 'rerun /meta-diagnostics with scaled_min_spend = 10000'."
+            )
+        )
 
 
 def chart_creative_allocation(data: dict):
@@ -116,31 +193,63 @@ def chart_creative_allocation(data: dict):
         return
     df = pd.DataFrame(ads)
     df["spend"] = pd.to_numeric(df.get("spend", 0), errors="coerce").fillna(0)
-    df["tier"] = df.get("tier", "Other")
-    # Sort by spend descending — cpa ascending is wrong because cpa=0 (no conversions) sorts first
+    df["tier"] = df.get("tier", "Other (no conversions)")
+    # Guard: older results.json may not include cpa/conversions/ad_id_count
+    for col, default in [("cpa", 0.0), ("conversions", 0), ("ad_id_count", 1)]:
+        if col not in df.columns:
+            df[col] = default
+        else:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(default)
+    # Sort by spend descending
     df = df[df["spend"] > 0].sort_values("spend", ascending=False)
 
     top_n = 40
     df_top = df.head(top_n)
-    tier_color_map = {"Top 1%": "#a855f7", "Top 10%": "#6366f1", "Other": "#d1d5db"}
+    tier_order = ["Top 1%", "Top 10%", "Other (untested)", "Other (no conversions)"]
+    tier_color_map = {
+        "Top 1%":                "#a855f7",
+        "Top 10%":               "#6366f1",
+        "Other (untested)":      "#fbbf24",
+        "Other (no conversions)":"#d1d5db",
+        "Other":                 "#d1d5db",  # backwards compat with pre-S2 results.json
+    }
     fig = px.bar(
         df_top, x="name", y="spend",
         color="tier", color_discrete_map=tier_color_map,
-        labels={"name": "Ad", "spend": "Spend ($)", "tier": "Tier"},
-        title=f"Top {len(df_top)} ads by spend (of {len(df)} active in window)",
+        category_orders={"tier": tier_order},
+        hover_data={
+            "cpa":         ":$,.0f",
+            "conversions": ":.0f",
+            "ad_id_count": True,
+            "tier":        True,
+            "spend":       ":$,.0f",
+            "name":        False,
+        },
+        labels={"name": "Ad", "spend": "Spend ($)", "tier": "Tier",
+                "cpa": "CPA ($)", "conversions": "Conversions", "ad_id_count": "Ad copies"},
+        title=f"Top {len(df_top)} concepts by spend (of {len(df)} active in window)",
     )
     fig.update_layout(xaxis_tickangle=-45, margin=dict(t=30, b=80), height=380, xaxis_showticklabels=False)
 
-    # Annotation: how many ads account for 50% of total spend (from full sorted list)
+    # Annotation: how many concepts account for 50% of total spend
     total_spend = df["spend"].sum()
     cumulative = df["spend"].cumsum()
     ads_to_50pct = int((cumulative <= total_spend * 0.5).sum()) + 1
     fig.add_annotation(
         xref="paper", yref="paper", x=0.99, y=0.95, showarrow=False,
-        text=f"<b>{ads_to_50pct} ads = 50% of spend</b>",
+        text=f"<b>{ads_to_50pct} concepts = 50% of spend</b>",
         bgcolor="rgba(255,255,255,0.8)", bordercolor="#d1d5db", borderwidth=1,
     )
     st.plotly_chart(fig, use_container_width=True)
+
+    floor = data.get("allocation_min_spend", 500)
+    st.caption(
+        f"Ranking pool includes only concepts with ≥ ${floor:,.0f} lifetime spend "
+        f"(statistical-significance gate). Ads below this threshold are tagged "
+        f"\"Other (untested)\". To change this floor for your business — e.g. $100 "
+        f"for low-CAC accounts or $2,000 for high-CAC accounts — tell the AI: "
+        f"\"rerun /meta-diagnostics with allocation_min_spend = 1000\"."
+    )
 
 
 def chart_old_creative(data: dict):
@@ -490,6 +599,38 @@ def chart_volume_vs_spend(data: dict):
         st.table(rows)
 
 
+def render_data_quality_card(data_quality: dict):
+    clusters = data_quality.get("likely_related_concept_clusters", [])
+    if not clusters:
+        return
+    total_spend = data_quality.get("total_spend_in_clusters", 0)
+    pct = data_quality.get("spend_pct_of_total", 0)
+    st.markdown("---")
+    st.markdown("## Data Quality — Likely-related concepts")
+    st.caption(
+        f"{len(clusters)} cluster(s) detected · "
+        f"${total_spend:,.0f} combined ({pct:.1f}% of total spend). "
+        "These concepts were not auto-merged — review and rename in Meta if they're the same creative."
+    )
+    for cluster in clusters:
+        members = cluster.get("members", [])
+        combined = cluster.get("cluster_spend", 0)
+        evidence = cluster.get("evidence", "")
+        st.markdown(f"**Combined spend: ${combined:,.0f}** · _{evidence}_")
+        rows = [
+            {"Concept": m["name"], "Spend": f"${m['spend']:,.0f}",
+             "CPA": f"${m['cpa']:,.0f}" if m.get("cpa") else "—",
+             "Copies": m.get("ad_id_count", 1)}
+            for m in members
+        ]
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.caption(
+            f"These {len(members)} concepts share most of their name. "
+            "If they're the same creative, rename them in Meta to match. "
+            "If intentionally distinct (e.g. different version), no action needed."
+        )
+
+
 def priority_action_stack(analyses: list[dict]):
     criticals  = [(a["title"], a["action"]) for a in analyses if a["verdict"] == "CRITICAL"]
     warnings   = [(a["title"], a["action"]) for a in analyses if a["verdict"] == "WARNING"]
@@ -577,6 +718,8 @@ def main():
 
         analysis_card(title, verdict, meaning, action, make_chart_fn(analysis_id, data))
 
+    data_quality = results.get("data_quality", {})
+    render_data_quality_card(data_quality)
     priority_action_stack(analyses)
 
 

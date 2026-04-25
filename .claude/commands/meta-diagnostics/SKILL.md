@@ -203,23 +203,35 @@ Store the CPA label as: `"{conversion_event} Cost ({conversion_label})"` — use
 
 Meta creates a new `ad_id` with a new `created_time` every time an existing creative is duplicated into a new ad set. All analyses must operate on **creative concepts** (unique names), not raw `ad_id` rows. Before running any analysis, build the following two maps from `ads_6m`. Also build `concept_aggregates_90d` from `ads_90d` using the same logic (for A1 and A2).
 
+**Concept key normalization (apply before keying either map):**
+Before using an ad name as a map key, normalize it by stripping Meta's auto-duplicate suffixes. Meta appends these suffixes when a media manager duplicates an ad in the UI:
+- Strip trailing `" - Copy"`, `" - Copy 2"`, `" - Copy N"` (any non-negative integer N; case-insensitive) from the end of the name
+- Apply iteratively until the name is stable (handles `"X - Copy - Copy"`)
+- Trim whitespace after stripping
+- The **canonical key** is the normalized name (used only for grouping — never displayed)
+- The **display name** for charts is the **longest raw name string** within each canonical-key cluster (preserves the full naming-convention version)
+- Each concept entry must carry `name_variants: list[str]` of every raw name string that collapsed into it
+
+Example: `"BrandonPodcast-V4-Video - Copy"` and `"BrandonPodcast-V4-Video"` share canonical key `"BrandonPodcast-V4-Video"`. Display name = `"BrandonPodcast-V4-Video"` (the longer, fully-tagged version if available). `name_variants = ["BrandonPodcast-V4-Video", "BrandonPodcast-V4-Video - Copy"]`.
+
 **Map 1 — `concept_aggregates`** (used by A1, A2, A5):
-For each unique ad name in `ads_6m`, sum `spend` and `conversions` across ALL `ad_id` rows sharing that name. Compute `cpa` from the sums (not mean of per-row CPAs). Record `first_seen` (earliest `created_time`) and `ad_id_count`.
+For each canonical key in `ads_6m`, sum `spend` and `conversions` across ALL `ad_id` rows sharing that canonical key. Compute `cpa` from the sums (not mean of per-row CPAs). Record `first_seen` (earliest `created_time`) and `ad_id_count`.
 ```
-concept_aggregates[name] = {
-  spend:        sum of spend across all ad_ids with this name,
-  conversions:  sum of conversions across all ad_ids with this name,
-  cpa:          spend / conversions  (0 if conversions = 0),
-  ad_id_count:  count of ad_id rows collapsed,
-  first_seen:   earliest created_time across all ad_ids with this name
+concept_aggregates[display_name] = {
+  spend:         sum of spend across all ad_ids with this canonical key,
+  conversions:   sum of conversions across all ad_ids with this canonical key,
+  cpa:           spend / conversions  (0 if conversions = 0),
+  ad_id_count:   count of ad_id rows collapsed,
+  first_seen:    earliest created_time across all ad_ids with this canonical key,
+  name_variants: list of all raw name strings in this cluster
 }
 ```
 `concept_aggregates_90d` is built identically from `ads_90d`.
 
 **Map 2 — `concept_first_launch_months`** (used by A3, A4, A5, A7):
-For each unique ad name in `ads_6m`, record the earliest `created_time` calendar month (YYYY-MM). This is the concept's true launch month regardless of later duplications.
+For each canonical key in `ads_6m`, record the earliest `created_time` calendar month (YYYY-MM). This is the concept's true launch month regardless of later duplications.
 ```
-concept_first_launch_months[name] = earliest YYYY-MM of created_time across all ad_ids with that name
+concept_first_launch_months[display_name] = earliest YYYY-MM of created_time across all ad_ids with that canonical key
 ```
 
 **Truncation caveat:** If a creative was first launched BEFORE the start of `ads_6m`, its earliest visible month will be incorrectly attributed as its launch month. Flag the earliest calendar month present in the data as `truncation_warning: true` in analyses that use `concept_first_launch_months`.
@@ -234,19 +246,27 @@ concept_first_launch_months[name] = earliest YYYY-MM of created_time across all 
 1. For each concept in `concept_aggregates_90d`, use the aggregated `spend` and `cpa` fields. CPA is already computed from lifetime sums — do not re-derive it from individual ad rows.
 2. Compute `account_median_cpa` = median CPA of all concepts with CPA > 0.
 3. Compute `account_median_spend` = median spend of all concepts.
-4. Zone each concept (evaluated in order; first match wins):
-   - Red: CPA > 2 × account_median_cpa AND spend > 500
-   - Purple: in the lowest-CPA 10% of concepts **among concepts with CPA > 0 AND conversions ≥ 1** by count. Zero-conversion concepts are ineligible for Purple.
-   - Green: everything else
-5. Compute:
-   - `red_spend_pct` = sum of Red zone spend / total spend × 100
-   - `winner_spend_pct` = sum of Purple zone spend / total spend × 100
-   - `testing_budget_pct` = sum of spend on concepts with spend < 500 / total spend × 100
+4. Derive spend thresholds from the account's own spend distribution (so they scale with account size):
+   - `concept_spends` = sorted list of all concept spend values in `concept_aggregates_90d`
+   - `testing_max_spend` = max(`allocation_min_spend`, P25 of `concept_spends`)
+   - `scaled_min_spend`  = P75 of `concept_spends`
+   - `red_cpa_multiple`  = 2.0 (unchanged)
+   - On a $72K/month account: P75 ≈ $5K, P25 ≈ $500. On a $1M/day account: P75 ≈ $50K, P25 ≈ $5K. No hardcoded assumption.
+5. Zone each concept (evaluated in order; first match wins):
+   - **Red**:    `spend ≥ testing_max_spend` AND `cpa ≥ red_cpa_multiple × account_median_cpa`
+   - **Purple**: `spend ≥ scaled_min_spend`  AND `0 < cpa ≤ account_median_cpa`
+   - **Green**:  `spend < testing_max_spend` AND `(cpa = 0 OR cpa ≤ account_median_cpa)`
+   - **Unzoned**: everything else — visible on chart in neutral grey, excluded from concentration math
+6. Compute:
+   - `red_spend_pct`      = sum of Red zone spend / total spend × 100
+   - `winner_spend_pct`   = sum of Purple zone spend / total spend × 100
+   - `testing_budget_pct` = sum of Green zone spend / total spend × 100
+   - `zone_concentration` — per-zone count, spend, spend_pct, conversions, conversions_pct
 
 **Verdict:**
-- HEALTHY: winner_spend_pct > 40 AND testing_budget_pct between 10-20 AND red_spend_pct < 15
-- WARNING: winner_spend_pct 20-40 OR red_spend_pct 15-25
-- CRITICAL: red_spend_pct > 25 OR (all ads have spend < 5% of total — no clear winner)
+- HEALTHY: `winner_spend_pct > 40` AND `testing_budget_pct` between 10–20 AND `red_spend_pct < 15`
+- WARNING: `winner_spend_pct` 20–40 OR `red_spend_pct` 15–25
+- CRITICAL: `red_spend_pct > 25` OR (no Purple concepts — no scaled winners at all)
 
 **Meaning (examples):**
 - HEALTHY: "Your testing budget is well-allocated — winners are scaling and losers are being cut."
@@ -256,17 +276,30 @@ concept_first_launch_months[name] = earliest YYYY-MM of created_time across all 
 **Action (examples):**
 - HEALTHY: "Keep current allocation — review Red zone ads quarterly."
 - WARNING: "Pause the top 3 Red zone ads by spend this week and reallocate budget to Purple zone."
-- CRITICAL: "List all Red zone ads and pause any with lifetime spend > $500 and CPA > 2× account median. Do this before the next billing period."
+- CRITICAL: "List all Red zone ads and pause any with lifetime spend above the testing floor and CPA above 2× account median. Do this before the next billing period."
 
 **Dashboard data dict:**
 ```json
 {
-  "ads": [{"name": "...", "spend": 0.0, "cpa": 0.0, "conversions": 0, "ad_id_count": 1, "zone": "Green|Red|Purple"}],
+  "ads": [{"name": "...", "spend": 0.0, "cpa": 0.0, "conversions": 0, "ad_id_count": 1,
+           "zone": "Green|Red|Purple|Unzoned"}],
   "cpa_label": "Purchase Cost (paid subscription sign-up)",
   "account_median_cpa": 0.0,
   "red_spend_pct": 0.0,
   "winner_spend_pct": 0.0,
-  "testing_budget_pct": 0.0
+  "testing_budget_pct": 0.0,
+  "zone_concentration": {
+    "purple":  {"count": 0, "spend": 0.0, "spend_pct": 0.0, "conversions": 0.0, "conversions_pct": 0.0},
+    "red":     {"count": 0, "spend": 0.0, "spend_pct": 0.0, "conversions": 0.0, "conversions_pct": 0.0},
+    "green":   {"count": 0, "spend": 0.0, "spend_pct": 0.0, "conversions": 0.0, "conversions_pct": 0.0},
+    "unzoned": {"count": 0, "spend": 0.0, "spend_pct": 0.0, "conversions": 0.0, "conversions_pct": 0.0}
+  },
+  "box_thresholds": {
+    "testing_max_spend": 0.0,
+    "scaled_min_spend":  0.0,
+    "red_cpa_multiple":  2.0,
+    "median_cpa":        0.0
+  }
 }
 ```
 
@@ -277,30 +310,35 @@ concept_first_launch_months[name] = earliest YYYY-MM of created_time across all 
 **Data used:** `concept_aggregates_90d` (reuse from Analysis 1 — no new API call)
 
 **Calculations:**
-1. Separate concepts into two pools:
-   - **Ranked pool**: CPA > 0 AND conversions ≥ 1. The only concepts eligible for percentile tiers.
-   - **Unranked**: CPA = 0 or conversions = 0. Tagged "Other" and excluded from all percentile math.
+1. Separate concepts from `concept_aggregates_90d` into three pools:
+   - **Ranked pool**: CPA > 0 AND conversions ≥ 1 AND spend ≥ `allocation_min_spend` (default `$500`; read from config). The only concepts eligible for percentile tiers.
+   - **Sub-threshold**: CPA > 0 AND conversions ≥ 1 AND spend < `allocation_min_spend`. Tagged `"Other (untested)"` — the account hasn't put enough money behind these to call them winners or losers. Excluded from percentile math but counted in `sub_threshold_spend_pct`.
+   - **Unranked**: CPA = 0 or conversions = 0. Tagged `"Other (no conversions)"`. Excluded from all percentile math.
 2. Rank the ranked pool by CPA ascending (lowest CPA = best).
 3. Identify top 1% by count (ceil) and top 10% by count — from the ranked pool only.
 4. Compute:
    - `top_1pct_spend_pct` = spend in top 1% / total spend × 100
    - `top_10pct_spend_pct` = spend in top 10% / total spend × 100
-5. Tag each concept: "Top 1%", "Top 10%", or "Other" (unranked are always "Other")
+   - `sub_threshold_spend_pct` = spend in sub-threshold pool / total spend × 100
+5. Tag each concept: `"Top 1%"`, `"Top 10%"`, `"Other (untested)"`, or `"Other (no conversions)"`
 6. Spend-weighted avg CPA = sum(spend × cpa) / sum(spend) — all concepts with spend > 0
 7. Unweighted median CPA = median(cpa) of the ranked pool only
-8. `budget_waste_signal` = spend_weighted_avg_cpa - unweighted_median_cpa (positive = budget on worse ads)
+8. `budget_waste_signal` = spend_weighted_avg_cpa - unweighted_median_cpa (positive = budget is concentrated on worse-than-median ads)
 
 **Verdict:**
-- HEALTHY: top_10pct_spend_pct > 50
-- WARNING: top_10pct_spend_pct 30-50
-- CRITICAL: top_10pct_spend_pct < 30 OR highest-spend ads are NOT lowest-CPA (budget_waste_signal > 20% of median CPA)
+- HEALTHY: `top_10pct_spend_pct > 50` AND `sub_threshold_spend_pct` between 5–25 (budget concentrated on winners, healthy testing pool)
+- WARNING: `top_10pct_spend_pct` 30–50 OR `sub_threshold_spend_pct > 25` (too much budget stuck in the untested pool, never graduating)
+- CRITICAL: `top_10pct_spend_pct < 30` OR `budget_waste_signal > 20% of median CPA`
 
 **Dashboard data dict:**
 ```json
 {
-  "ads": [{"name": "...", "spend": 0.0, "cpa": 0.0, "tier": "Top 1%|Top 10%|Other"}],
+  "ads": [{"name": "...", "spend": 0.0, "cpa": 0.0, "conversions": 0,
+           "ad_id_count": 1, "tier": "Top 1%|Top 10%|Other (untested)|Other (no conversions)"}],
   "top_1pct_spend_pct": 0.0,
   "top_10pct_spend_pct": 0.0,
+  "sub_threshold_spend_pct": 0.0,
+  "allocation_min_spend": 500,
   "budget_waste_signal": 0.0
 }
 ```
@@ -639,6 +677,50 @@ Also compute:
 
 ---
 
+---
+
+## DATA QUALITY PASS (run after all 7 analyses, before writing results.json)
+
+### Likely-related concept detection
+
+After `concept_aggregates` is finalized and all 7 analyses have run, perform a prefix-similarity scan to detect concept-name pairs that share a long common prefix but were **not** merged by canonical normalization (i.e., they have different canonical keys — neither is a `" - Copy"` variant of the other).
+
+**Algorithm:**
+For each pair of distinct display names in `concept_aggregates`:
+1. Normalize each name: lowercase, keep only alphanumeric characters (strip hyphens, spaces, punctuation)
+2. Compute their Longest Common Prefix (LCP) on the normalized strings
+3. Flag as "likely related" if: `len(LCP) ≥ 30` AND `len(LCP) / min(len(normalized_a), len(normalized_b)) ≥ 0.60`
+4. Group flagged pairs into clusters (union-find or simple greedy: if A~B and B~C then {A,B,C} is one cluster)
+5. For each cluster, compute `cluster_spend` = sum of member concept spend; include `evidence` = a brief description of why they matched (e.g. "Names share 82 chars of prefix; one is a strict prefix of the other")
+
+Emit the result as a top-level `data_quality` block in `results.json` (sibling to `overview` and `analyses`):
+
+```json
+{
+  "data_quality": {
+    "likely_related_concept_clusters": [
+      {
+        "cluster_spend": 12852.20,
+        "members": [
+          {"name": "IfSomeoneJust...-V6-Video-...", "spend": 9858.84, "ad_id_count": 6,
+           "conversions": 22, "cpa": 448.13},
+          {"name": "IfSomeoneJust...", "spend": 2993.36, "ad_id_count": 1,
+           "conversions": 6, "cpa": 498.89}
+        ],
+        "evidence": "Names share 82 chars of prefix; one is a strict prefix of the other"
+      }
+    ],
+    "total_clusters": 0,
+    "total_spend_in_clusters": 0.0,
+    "spend_pct_of_total": 0.0
+  }
+}
+```
+
+If no clusters are found, emit `data_quality` with an empty `likely_related_concept_clusters` list and zeroed totals. **Never omit the `data_quality` key** — the dashboard checks for its presence.
+
+---
+
 ## PHASE 5 — WRITE OUTPUTS
 
 ### Step 1: Write results.json
@@ -655,6 +737,7 @@ Write `~/meta-diagnostics/results.json` with this structure:
     "active_ads": 151,
     "date_range": "last_90_days"
   },
+  "data_quality": { ...as specified in Data Quality Pass above... },
   "analyses": [
     {
       "id": "test_and_learn",
