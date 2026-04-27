@@ -205,18 +205,18 @@ def chart_creative_allocation(data: dict):
 
     top_n = 40
     df_top = df.head(top_n)
-    tier_order = ["Top 1%", "Top 10%", "Other (untested)", "Other (no conversions)"]
     tier_color_map = {
-        "Top 1%":                "#a855f7",
-        "Top 10%":               "#6366f1",
-        "Other (untested)":      "#fbbf24",
-        "Other (no conversions)":"#d1d5db",
-        "Other":                 "#d1d5db",  # backwards compat with pre-S2 results.json
+        "Top 1%":                 "#a855f7",  # purple
+        "Top 10%":                "#6366f1",  # indigo
+        "Other (ranked)":         "#9ca3af",  # neutral gray
+        "Other (untested)":       "#d1d5db",  # light gray
+        "Other (no conversions)": "#e5e7eb",  # lightest gray
+        "Other":                  "#d1d5db",  # backwards compat with pre-S2 results.json
     }
+    st.caption("Each bar is one ad concept — all ads sharing the same name are aggregated into a single bar.")
     fig = px.bar(
         df_top, x="name", y="spend",
         color="tier", color_discrete_map=tier_color_map,
-        category_orders={"tier": tier_order},
         hover_data={
             "cpa":         ":$,.0f",
             "conversions": ":.0f",
@@ -225,9 +225,9 @@ def chart_creative_allocation(data: dict):
             "spend":       ":$,.0f",
             "name":        False,
         },
-        labels={"name": "Ad", "spend": "Spend ($)", "tier": "Tier",
+        labels={"name": "Ad concept", "spend": "Spend ($)", "tier": "Tier",
                 "cpa": "CPA ($)", "conversions": "Conversions", "ad_id_count": "Ad copies"},
-        title=f"Top {len(df_top)} concepts by spend (of {len(df)} active in window)",
+        title=f"Top {len(df_top)} ad concepts by spend (of {len(df)} concepts in 90-day window)",
     )
     fig.update_layout(xaxis_tickangle=-45, margin=dict(t=30, b=80), height=380, xaxis_showticklabels=False)
 
