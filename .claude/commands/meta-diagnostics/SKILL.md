@@ -55,9 +55,25 @@ Save `~/.meta-diagnostics-config.json` with `"deps_checked": true` (merge with a
 
 ## PHASE 1 — CONFIG
 
+**Config override check (run first, before reading or collecting config):**
+If the user passed any override parameters when invoking the skill — phrases like `"with allocation_min_spend = 1000"`, `"target_cpa = 150"`, `"winner_top_percentile = 0.15"`, `"target_cpa = null"` — do the following before anything else:
+- Load `~/.meta-diagnostics-config.json` (if it exists)
+- Update the specified key(s): `allocation_min_spend` (positive integer), `target_cpa` (positive number, or null to clear it), `winner_top_percentile` (decimal 0.01–0.50)
+- Write the updated config back to disk
+- Confirm: `"Config updated: [key] set to [value]. Proceeding with diagnostic..."`
+- Skip to Phase 2
+
+Non-overridable without full re-setup: `account_id`, `conversion_event`, `industry_vertical`.
+
 Read `~/.meta-diagnostics-config.json`.
 
-If the config file exists and contains `account_id`, `conversion_event`, `conversion_label`, `industry_vertical`, and `winner_threshold` — load it and skip to Phase 2.
+If the config file exists and contains `account_id`, `conversion_event`, `conversion_label`, and `industry_vertical`:
+- If `allocation_min_spend` is missing, add it with value `500` (silent default — no prompt)
+- If `winner_top_percentile` is missing, add it with value `0.20` (silent default — no prompt)
+- If `target_cpa` is missing, add it with value `null` (silent default — no prompt)
+- If `winner_threshold` is present, ignore it silently (deprecated key)
+- Write updated config to disk only if any defaults were added
+- Skip to Phase 2
 
 Otherwise, ask the following 4 questions in sequence:
 
@@ -110,16 +126,16 @@ Type the number or the name.
 
 **Question 4:**
 ```
-What spend threshold defines a "winning" ad for your account?
+What CPA would you consider a winning result for your business?
 
-This is the minimum lifetime spend an ad must reach before you consider it a scaled winner.
+This is the maximum [conversion_label] cost you'd accept for a scaled creative.
+If you have a clear target (e.g. "anything under $200 is profitable"), enter it.
+If not, leave blank — the system will identify winners relative to your account's
+performance distribution (top 20% by CPA among converted concepts).
 
-Suggested range: $1,000–$5,000 depending on your account size.
-Default: $3,000
-
-Just type a number (e.g. 2500) or press Enter to use $3,000.
+Type a number (e.g. 200) or press Enter to skip.
 ```
-Default to 3000 if the user presses Enter or types nothing.
+Parse as a positive float if provided. If blank or "skip", store as `null`. Re-prompt once if a non-numeric, non-blank value is entered.
 
 **Save config:**
 Write all values to `~/.meta-diagnostics-config.json`:
@@ -130,9 +146,13 @@ Write all values to `~/.meta-diagnostics-config.json`:
   "conversion_event": "...",
   "conversion_label": "...",
   "industry_vertical": "...",
-  "winner_threshold": 3000
+  "target_cpa": null,
+  "allocation_min_spend": 500,
+  "winner_top_percentile": 0.20
 }
 ```
+`target_cpa` is `null` if the user skipped Question 4, or their numeric input if provided.
+`allocation_min_spend` and `winner_top_percentile` are always written with these defaults on first setup.
 
 ---
 
@@ -155,569 +175,208 @@ Confirm to the user: "Meta is connected. Pulling your account data now..."
 
 Pull all data in one pass. Reference the stored `account_id` from config.
 
+Create the raw data directory before writing: `mkdir -p ~/meta-diagnostics/raw`
+
 **Pull A — 90-day ad data** (Analyses 1, 2, 3):
 Call `meta_get_ads` with `date_range: "last_90d"`
 Store as `ads_90d`.
+Write to disk: `~/meta-diagnostics/raw/ads_90d.json`
+If the response is an error, write `{"error": "<message>", "data": []}` — never skip the write.
 
 **Pull B — 6-month ad data** (Analyses 4, 5, 7):
 Call `meta_get_ads` with `date_range: "last_6_months"`.
 Store as `ads_6m`.
+Write to disk: `~/meta-diagnostics/raw/ads_6m.json`
+If the response is an error, write `{"error": "<message>", "data": []}`.
 
 If you need a custom window (e.g. a prior period), pass the date_range as a JSON string:
 `date_range: '{"since":"2025-10-24","until":"2026-01-22"}'`
 Do NOT pass the literal string `"custom"` or any other free-text value — that is not a valid preset and will return an error.
 
-After every `meta_get_ads` call, verify the response includes `since` and `until` fields that match the window you requested. If they don't match, stop and surface the error before proceeding with analysis.
+After every `meta_get_ads` call, verify the response includes `since` and `until` fields that match the window you requested. If they differ by more than 3 days, surface a warning and ask the user whether to continue with the returned window or abort.
 
 **Pull C — Monthly reach** (Analysis 6):
 Call `meta_get_monthly_reach` with `months: 13`
 Store as `monthly_reach`.
+Write to disk: `~/meta-diagnostics/raw/monthly_reach.json`
+If the response is an error or empty, write `[]`.
 
 **Pull D — Account overview** (spend tier for Analysis 7):
 Call `meta_get_account_overview` with `date_range: "last_90d"`
 Store as `account_overview`.
+Write to disk: `~/meta-diagnostics/raw/account_overview.json`
+If the response is an error, write `{}`.
 
 **Pull E — Per-ad monthly spend** (Analyses 3 and 4):
 Call `meta_get_ad_monthly_spend` with `months: 6`
 Store as `ad_monthly_spend`.
+Write to disk: `~/meta-diagnostics/raw/ad_monthly_spend.json`
+If the response is an error or empty, write `[]`.
 
-Tell the user: "Data pulled. Running 7 analyses..."
-
----
-
-## PHASE 4 — ANALYSES
-
-Run all 7 analyses using the data from Phase 3. For each analysis, produce:
-- `title`: analysis name
-- `verdict`: HEALTHY / WARNING / CRITICAL
-- `meaning`: one plain-English sentence
-- `action`: one specific next step
-- `data`: structured dict for the dashboard charts (spec below)
-- `metrics`: key numbers table (for Markdown report)
-
-Store the CPA label as: `"{conversion_event} Cost ({conversion_label})"` — use this everywhere you'd write "CPA".
+Tell the user: "Data pulled. Raw data saved to ~/meta-diagnostics/raw/ (5 files). Running analyses..."
 
 ---
 
-### Shared Step — Build concept-level maps (run ONCE before any analysis)
+## PHASE 4 — COMPUTE + INTERPRET
 
-Meta creates a new `ad_id` with a new `created_time` every time an existing creative is duplicated into a new ad set. All analyses must operate on **creative concepts** (unique names), not raw `ad_id` rows. Before running any analysis, build the following two maps from `ads_6m`. Also build `concept_aggregates_90d` from `ads_90d` using the same logic (for A1 and A2).
+**Your role in Phase 4:** Run the compute script to get all numbers, then write interpretation copy (meaning, action, metrics) around the results. The script sets all verdicts — do not recompute them. Always use `{conversion_label}` (from config) instead of "CPA" in copy.
 
-**Concept key normalization (apply before keying either map):**
-Before using an ad name as a map key, normalize it by stripping Meta's auto-duplicate suffixes. Meta appends these suffixes when a media manager duplicates an ad in the UI:
-- Strip trailing `" - Copy"`, `" - Copy 2"`, `" - Copy N"` (any non-negative integer N; case-insensitive) from the end of the name
-- Apply iteratively until the name is stable (handles `"X - Copy - Copy"`)
-- Trim whitespace after stripping
-- The **canonical key** is the normalized name (used only for grouping — never displayed)
-- The **display name** for charts is the **longest raw name string** within each canonical-key cluster (preserves the full naming-convention version)
-- Each concept entry must carry `name_variants: list[str]` of every raw name string that collapsed into it
+### Step 1 — Run the compute script
 
-Example: `"BrandonPodcast-V4-Video - Copy"` and `"BrandonPodcast-V4-Video"` share canonical key `"BrandonPodcast-V4-Video"`. Display name = `"BrandonPodcast-V4-Video"` (the longer, fully-tagged version if available). `name_variants = ["BrandonPodcast-V4-Video", "BrandonPodcast-V4-Video - Copy"]`.
-
-**Map 1 — `concept_aggregates`** (used by A1, A2, A5):
-For each canonical key in `ads_6m`, sum `spend` and `conversions` across ALL `ad_id` rows sharing that canonical key. Compute `cpa` from the sums (not mean of per-row CPAs). Record `first_seen` (earliest `created_time`) and `ad_id_count`.
+Locate `_run_analyses.py` in the same directory as this SKILL.md file:
 ```
-concept_aggregates[display_name] = {
-  spend:         sum of spend across all ad_ids with this canonical key,
-  conversions:   sum of conversions across all ad_ids with this canonical key,
-  cpa:           spend / conversions  (0 if conversions = 0),
-  ad_id_count:   count of ad_id rows collapsed,
-  first_seen:    earliest created_time across all ad_ids with this canonical key,
-  name_variants: list of all raw name strings in this cluster
-}
+find ~/.claude -name "_run_analyses.py" -path "*/meta-diagnostics/*" | head -1
 ```
-`concept_aggregates_90d` is built identically from `ads_90d`.
+Store the result as `<script_path>`. The directory containing it is `<skill_dir>`.
 
-**Map 2 — `concept_first_launch_months`** (used by A3, A4, A5, A7):
-For each canonical key in `ads_6m`, record the earliest `created_time` calendar month (YYYY-MM). This is the concept's true launch month regardless of later duplications.
+Run:
 ```
-concept_first_launch_months[display_name] = earliest YYYY-MM of created_time across all ad_ids with that canonical key
+python3 <script_path> \
+  --skill-dir <skill_dir> \
+  --raw-dir ~/meta-diagnostics/raw \
+  --config ~/.meta-diagnostics-config.json \
+  --output ~/meta-diagnostics/computed.json
 ```
 
-**Truncation caveat:** If a creative was first launched BEFORE the start of `ads_6m`, its earliest visible month will be incorrectly attributed as its launch month. Flag the earliest calendar month present in the data as `truncation_warning: true` in analyses that use `concept_first_launch_months`.
+If the script exits with an error, surface the error message and stop. Tell the user:
+```
+The compute script encountered an error. Details: [error output]
+To fix: run `bash install.sh` from the meta-account-diagnostics repo root, then re-run /meta-diagnostics.
+```
+
+If the script succeeds, confirm: "Analysis computed. Writing interpretation..."
+
+### Step 2 — Read computed.json
+
+Load `~/meta-diagnostics/computed.json`. Each analysis entry contains:
+- `verdict`: HEALTHY / WARNING / CRITICAL / INSUFFICIENT_DATA — **already set, do not change**
+- `data`: all numeric fields — **already computed, do not modify**
+- `meaning`, `action`: empty strings — **you fill these in below**
+- `metrics`: empty dict — **you populate with key numbers for the markdown report**
+
+### Step 3 — Write interpretation copy for each analysis
+
+For each of the 7 analyses, read the verdict and data dict, then write `meaning` and `action`. Be direct — name specific numbers. Reference the `{conversion_label}` from config (not generic "CPA").
 
 ---
 
 ### Analysis 1: Test & Learn Spend Optimization
 
-**Data used:** `concept_aggregates_90d` (built from `ads_90d` in the Shared Step above)
+Read from `data`: `winner_spend_pct`, `red_spend_pct`, `testing_budget_pct`, `zone_concentration`, `box_thresholds`.
 
-**Calculations:**
-1. For each concept in `concept_aggregates_90d`, use the aggregated `spend` and `cpa` fields. CPA is already computed from lifetime sums — do not re-derive it from individual ad rows.
-2. Compute `account_median_cpa` = median CPA of all concepts with CPA > 0.
-3. Compute `account_median_spend` = median spend of all concepts.
-4. Derive spend thresholds from the account's own spend distribution (so they scale with account size):
-   - `concept_spends` = sorted list of all concept spend values in `concept_aggregates_90d`
-   - `testing_max_spend` = max(`allocation_min_spend`, P25 of `concept_spends`)
-   - `scaled_min_spend`  = P75 of `concept_spends`
-   - `red_cpa_multiple`  = 2.0 (unchanged)
-   - On a $72K/month account: P75 ≈ $5K, P25 ≈ $500. On a $1M/day account: P75 ≈ $50K, P25 ≈ $5K. No hardcoded assumption.
-5. Zone each concept (evaluated in order; first match wins):
-   - **Red**:    `spend ≥ testing_max_spend` AND `cpa ≥ red_cpa_multiple × account_median_cpa`
-   - **Purple**: `spend ≥ scaled_min_spend`  AND `0 < cpa ≤ account_median_cpa`
-   - **Green**:  `spend < testing_max_spend` AND `(cpa = 0 OR cpa ≤ account_median_cpa)`
-   - **Unzoned**: everything else — visible on chart in neutral grey, excluded from concentration math
-6. Compute:
-   - `red_spend_pct`      = sum of Red zone spend / total spend × 100
-   - `winner_spend_pct`   = sum of Purple zone spend / total spend × 100
-   - `testing_budget_pct` = sum of Green zone spend / total spend × 100
-   - `zone_concentration` — per-zone count, spend, spend_pct, conversions, conversions_pct
+**HEALTHY:** Meaning: "Your testing budget is well-allocated — {winner_spend_pct:.0f}% of spend is on Purple zone winners, {testing_budget_pct:.0f}% in the testing pool, and only {red_spend_pct:.0f}% on scaled losers." Action: "Keep current allocation. Review Red zone ads quarterly and pause any crossing 2× median {conversion_label}."
 
-**Verdict:**
-- HEALTHY: `winner_spend_pct > 40` AND `testing_budget_pct` between 10–20 AND `red_spend_pct < 15`
-- WARNING: `winner_spend_pct` 20–40 OR `red_spend_pct` 15–25
-- CRITICAL: `red_spend_pct > 25` OR (no Purple concepts — no scaled winners at all)
+**WARNING:** Meaning: "Budget is spreading into underperforming ads — only {winner_spend_pct:.0f}% is on Purple zone winners (target: >40%)." Action: "Pause the top 2–3 Red zone ads by spend this week (spend ≥ ${box_thresholds.testing_max_spend:,.0f}, {conversion_label} ≥ ${box_thresholds.median_cpa * 2:,.0f}) and reallocate to Purple."
 
-**Meaning (examples):**
-- HEALTHY: "Your testing budget is well-allocated — winners are scaling and losers are being cut."
-- WARNING: "Budget is spreading into underperforming ads; consider consolidating spend on your top performers."
-- CRITICAL: "Over {red_spend_pct:.0f}% of your budget is on ads with high CPA and high spend — these are scaled losers that need to be cut immediately."
+**CRITICAL:** Meaning: "{red_spend_pct:.0f}% of budget is on scaled ads with {conversion_label} more than 2× the account median." If no Purple concepts: "There are no scaled winner concepts — all high-spend ads have above-median {conversion_label}." Action: "List all ads with spend ≥ ${box_thresholds.testing_max_spend:,.0f} and {conversion_label} ≥ ${box_thresholds.median_cpa * 2:,.0f}. Pause them before the next billing period."
 
-**Action (examples):**
-- HEALTHY: "Keep current allocation — review Red zone ads quarterly."
-- WARNING: "Pause the top 3 Red zone ads by spend this week and reallocate budget to Purple zone."
-- CRITICAL: "List all Red zone ads and pause any with lifetime spend above the testing floor and CPA above 2× account median. Do this before the next billing period."
-
-**Dashboard data dict:**
-```json
-{
-  "ads": [{"name": "...", "spend": 0.0, "cpa": 0.0, "conversions": 0, "ad_id_count": 1,
-           "zone": "Green|Red|Purple|Unzoned"}],
-  "cpa_label": "Purchase Cost (paid subscription sign-up)",
-  "account_median_cpa": 0.0,
-  "red_spend_pct": 0.0,
-  "winner_spend_pct": 0.0,
-  "testing_budget_pct": 0.0,
-  "zone_concentration": {
-    "purple":  {"count": 0, "spend": 0.0, "spend_pct": 0.0, "conversions": 0.0, "conversions_pct": 0.0},
-    "red":     {"count": 0, "spend": 0.0, "spend_pct": 0.0, "conversions": 0.0, "conversions_pct": 0.0},
-    "green":   {"count": 0, "spend": 0.0, "spend_pct": 0.0, "conversions": 0.0, "conversions_pct": 0.0},
-    "unzoned": {"count": 0, "spend": 0.0, "spend_pct": 0.0, "conversions": 0.0, "conversions_pct": 0.0}
-  },
-  "box_thresholds": {
-    "testing_max_spend": 0.0,
-    "scaled_min_spend":  0.0,
-    "red_cpa_multiple":  2.0,
-    "median_cpa":        0.0
-  }
-}
-```
+**metrics:** Red zone spend %, Purple (winners) %, Green (testing) %, Purple concept count, Red concept count, testing floor $, scale floor $.
 
 ---
 
 ### Analysis 2: Creative Allocation
 
-**Data used:** `concept_aggregates_90d` (reuse from Analysis 1 — no new API call)
+Read from `data`: `top_1pct_spend_pct`, `top_10pct_spend_pct`, `sub_threshold_spend_pct`, `budget_waste_signal`, `allocation_min_spend`.
 
-**Calculations:**
-1. Separate concepts from `concept_aggregates_90d` into three pools:
-   - **Ranked pool**: CPA > 0 AND conversions ≥ 1 AND spend ≥ `allocation_min_spend` (default `$500`; read from config). The only concepts eligible for percentile tiers.
-   - **Sub-threshold**: CPA > 0 AND conversions ≥ 1 AND spend < `allocation_min_spend`. Tagged `"Other (untested)"` — the account hasn't put enough money behind these to call them winners or losers. Excluded from percentile math but counted in `sub_threshold_spend_pct`.
-   - **Unranked**: CPA = 0 or conversions = 0. Tagged `"Other (no conversions)"`. Excluded from all percentile math.
-2. Rank the ranked pool by CPA ascending (lowest CPA = best).
-3. Identify top 1% by count (ceil) and top 10% by count — from the ranked pool only.
-4. Compute:
-   - `top_1pct_spend_pct` = spend in top 1% / total spend × 100
-   - `top_10pct_spend_pct` = spend in top 10% / total spend × 100
-   - `sub_threshold_spend_pct` = spend in sub-threshold pool / total spend × 100
-5. Tag each concept: `"Top 1%"`, `"Top 10%"`, `"Other (untested)"`, or `"Other (no conversions)"`
-6. Spend-weighted avg CPA = sum(spend × cpa) / sum(spend) — all concepts with spend > 0
-7. Unweighted median CPA = median(cpa) of the ranked pool only
-8. `budget_waste_signal` = spend_weighted_avg_cpa - unweighted_median_cpa (positive = budget is concentrated on worse-than-median ads)
+**HEALTHY:** Meaning: "{top_10pct_spend_pct:.0f}% of budget is on your top-performing 10% of concepts — well-concentrated on proven winners." Action: "Keep allocation. If sub-threshold pool grows above 25%, graduate promising concepts by pushing spend above the ${allocation_min_spend:,.0f} floor."
 
-**Verdict:**
-- HEALTHY: `top_10pct_spend_pct > 50` AND `sub_threshold_spend_pct` between 5–25 (budget concentrated on winners, healthy testing pool)
-- WARNING: `top_10pct_spend_pct` 30–50 OR `sub_threshold_spend_pct > 25` (too much budget stuck in the untested pool, never graduating)
-- CRITICAL: `top_10pct_spend_pct < 30` OR `budget_waste_signal > 20% of median CPA`
+**WARNING:** Meaning (low winners): "Only {top_10pct_spend_pct:.0f}% of budget is on top-10% performers — spread too thin." Meaning (high untested): "{sub_threshold_spend_pct:.0f}% of budget is locked in sub-threshold concepts that have never been properly tested." Action: "Scale Top 10% concepts by 20%. Push 2–3 sub-threshold concepts with conversions above ${allocation_min_spend:,.0f} to graduate them."
 
-**Dashboard data dict:**
-```json
-{
-  "ads": [{"name": "...", "spend": 0.0, "cpa": 0.0, "conversions": 0,
-           "ad_id_count": 1, "tier": "Top 1%|Top 10%|Other (untested)|Other (no conversions)"}],
-  "top_1pct_spend_pct": 0.0,
-  "top_10pct_spend_pct": 0.0,
-  "sub_threshold_spend_pct": 0.0,
-  "allocation_min_spend": 500,
-  "budget_waste_signal": 0.0
-}
-```
+**CRITICAL:** Meaning: "Only {top_10pct_spend_pct:.0f}% on top performers — allocation is fragmented. Budget waste signal: ${budget_waste_signal:,.0f} above median {conversion_label}." Action: "Double spend on Top 1% concepts this week. Pause 'Other (no conversions)' concepts running more than 30 days."
+
+**metrics:** Top 1% spend %, Top 10% spend %, Sub-threshold spend %, Budget waste signal $, Spend floor $.
 
 ---
 
 ### Analysis 3: Reliance on Old Creative
 
-**Data used:** `ad_monthly_spend` (Pull E) + `concept_first_launch_months` (Shared Step)
+Read from `data`: `old_creative_spend_pct`, `data_warnings`. If `data_warnings` is non-empty, prepend a brief note to meaning.
 
-**Calculations:**
-1. From `ad_monthly_spend`, iterate over all (ad, month) pairs where the ad's spend in that month is > 0.
-2. For each pair, compute `age_at_month` using the **concept's** true first launch date, not the individual ad_id's `created_time`:
-   `age_at_month = (first day of that calendar month − date(concept_first_launch_months[ad.name])).days`
-   This ensures a creative duplicated into a new ad set in January from a September original is correctly aged 120+ days in January, not 0 days.
-3. Assign age bucket based on `age_at_month`:
-   - New (0-30d): age_at_month ≤ 30
-   - Mid (31-60d): age_at_month 31–60
-   - Aging (61-90d): age_at_month 61–90
-   - Old (90d+): age_at_month > 90
-4. Accumulate spend per (calendar_month, bucket). Initialize each cell with a fresh `{k: 0.0 for k in BUCKET_KEYS}` — never use a shared mutable accumulator as the dict factory (doing so causes phantom spend to leak into newly-seen cells).
-5. Compute `old_creative_spend_pct` = sum of (Aging + Old) spend across all calendar months / total spend × 100.
-6. For each (month, bucket) cell, collect the constituent (ad, spend-in-that-month) pairs, sort by spend-in-that-month descending, keep top 5 (`TOP_N_PER_BUCKET = 5`). Truncate ad names to 60 characters, appending `…` if truncated. Empty cells → `[]`.
+**HEALTHY:** Meaning: "{old_creative_spend_pct:.0f}% of spend on aging creative (61+ days) — rotation is healthy." Action: "Flag any ad running 90+ days that hasn't been refreshed — even winning creative fatigues."
 
-**Verdict:**
-- HEALTHY: old_creative_spend_pct < 40
-- WARNING: old_creative_spend_pct 40-65
-- CRITICAL: old_creative_spend_pct > 65
+**WARNING:** Meaning: "{old_creative_spend_pct:.0f}% of spend on aging creative (61+ days). New creative is being outspent by fatiguing ads." Action: "Launch 3–5 new concepts this week using the hooks/angles from best-performing old creative. Set a rotation policy: creative running 60+ days gets a refresh brief."
 
-**Dashboard data dict:**
-```json
-{
-  "monthly_spend_by_age": [
-    {"month": "2025-01", "New (0-30d)": 0.0, "Mid (31-60d)": 0.0, "Aging (61-90d)": 0.0, "Old (90d+)": 0.0}
-  ],
-  "monthly_top_ads_by_age": [
-    {
-      "month": "2025-01",
-      "buckets": {
-        "New (0-30d)":    [{"name": "Ad name (max 60 chars)", "spend": 0.0, "rank": 1}],
-        "Mid (31-60d)":   [],
-        "Aging (61-90d)": [],
-        "Old (90d+)":     []
-      }
-    }
-  ],
-  "top_ads_per_bucket": 5,
-  "old_creative_spend_pct": 0.0
-}
-```
+**CRITICAL:** Meaning: "{old_creative_spend_pct:.0f}% of budget on ads more than 61 days old — creative pool is stale and likely fatiguing your audience." Action: "Pause top 3 highest-spend ads that are 90+ days old. Brief net-new creative immediately. Treat this as a 2-week creative sprint."
 
-Note: `monthly_top_ads_by_age` is additive — the dashboard gracefully degrades to bucket totals only when this field is absent (for results.json files generated before this change).
+**metrics:** Old creative spend (61d+) %.
 
 ---
 
 ### Analysis 4: Creative Churn
 
-**Data used:** `ad_monthly_spend` (Pull E) + `concept_first_launch_months` (Shared Step)
+Read from `data`: `avg_cohort_half_life_weeks`, `launch_trend`, `monthly_launches` (last 3 entries), `data_warnings`.
 
-**Calculations:**
+**HEALTHY:** Meaning: "Creative cohorts sustain spend for an average of {avg_cohort_half_life_weeks:.1f} weeks. Launch volume is {launch_trend}." Action: "Maintain cadence. Watch for half-life dropping below 4 weeks — that signals fatiguing creative."
 
-Step 1 — Group concepts into launch cohorts:
-- For each ad in `ad_monthly_spend`, use `concept_first_launch_months[ad.name]` as the cohort key (not `ad.created_time`). This correctly attributes all duplicates of a concept to the month it was first introduced.
-- Build a dict: `cohorts = { "2025-11": [name1, name2, ...], "2025-12": [...], ... }`
+**WARNING:** Meaning: "Cohort half-life is {avg_cohort_half_life_weeks:.1f} weeks — creative spending out faster than the 4-week baseline. Launch volume is {launch_trend}." Action: "Increase launch frequency — brief 2–3 net-new concepts per week. Prioritize angles with previously long half-lives."
 
-Step 2 — Build `cohort_spend_by_month`:
-- Enumerate every calendar month M in the 6-month window.
-- For each cohort C launched on or before M, sum `monthly_spend[month == M].spend` across ALL ad_ids whose name belongs to C (aggregating spend across duplicates).
-- Output one row per calendar month:
-  `{"month": "2025-11", "Nov 2025 launches": 5234.10, "Oct 2025 launches": 3201.55}`
-- Cohort column name format: `"{Mon YYYY} launches"` (e.g. "Nov 2025 launches").
-- Only include cohorts that have non-zero spend in at least one month.
+**CRITICAL:** Meaning: "Launch volume is {launch_trend} AND cohort half-life is {avg_cohort_half_life_weeks:.1f} weeks — running out of fresh creative with nothing in the pipeline." Action: "Stop refreshing old creative. Brief 5 genuinely new angles this week."
 
-Step 3 — Cohort half-life:
-- For each cohort C: find its peak spend month. Find the first subsequent month where spend drops below 50% of peak.
-  - If such a month is found: half-life = distance in months between peak and that month (minimum 1).
-  - If spend never drops below 50% of peak within the data window: half-life = data_window_months (the cohort is still active). Flag it as `still_active: true` in the per-cohort data. Include it in the average — treating still-active cohorts as having a very long half-life is the correct interpretation.
-- `avg_cohort_half_life_weeks` = mean half-life across all cohorts × 4.33.
+If `data_warnings` non-empty: prepend "Note: [first warning]. " to meaning.
 
-Step 4 — Monthly launch counts:
-- `monthly_launches` = for each month M, count of unique concepts whose `concept_first_launch_months` value equals M. (Used as fallback chart when cohort spend curves are unavailable — counts concepts, not raw `ad_id` rows.)
-
-Step 5 — Launch trend:
-- Compare last 3 months' launch counts. Growing = each month higher than prior. Declining = each month lower. Flat = otherwise.
-
-**Fallback (if `meta_get_ad_monthly_spend` returns an error or empty):**
-Distribute each ad's lifetime spend from `ads_6m` evenly across its active months (launch month → today). Use this to approximate `cohort_spend_by_month`. Add to the output:
-```json
-"data_warnings": ["Cohort spend approximated using even distribution — actual spend is typically front-loaded. Run meta_get_ad_monthly_spend for accurate curves."]
-```
-
-**Contract: never emit empty data fields.** If `cohort_spend_by_month` cannot be populated even with the fallback, set it to `[]` and populate `data_warnings` explaining why. Do NOT leave the field missing or silently empty — the dashboard surfaces `data_warnings` to the user.
-
-**Verdict:**
-- HEALTHY: Launch volume stable or growing MoM. Cohort half-life > 6 weeks (1.5 months).
-- WARNING: Launch volume declining 2+ months in a row OR cohort half-life < 4 weeks.
-- CRITICAL: Launch volume declining AND projected to fall below Motion median for spend tier within 30 days.
-
-**Dashboard data dict:**
-```json
-{
-  "cohort_spend_by_month": [
-    {"month": "2025-11", "Nov 2025 launches": 5234.10, "Oct 2025 launches": 3201.55},
-    {"month": "2025-12", "Nov 2025 launches": 4180.99, "Dec 2025 launches": 8120.30}
-  ],
-  "monthly_launches": [{"month": "2025-11", "count": 4}, {"month": "2025-12", "count": 6}],
-  "avg_cohort_half_life_weeks": 5.2,
-  "data_warnings": []
-}
-```
+**metrics:** Avg cohort half-life (weeks), Launch trend, last 3 months' launch counts by month.
 
 ---
 
 ### Analysis 5: Production & Slugging Rate
 
-**Data used:** `concept_aggregates` + `concept_first_launch_months` (Shared Step)
+Read from `data`: `recent_avg_hit_rate`, `prior_avg_hit_rate`, `motion_benchmark`, `spend_tier`, `target_cpa_mode`, `windows`.
 
-**Config parameters used:**
-- `winner_top_percentile` (default 0.20) — top X% by CPA among converted concepts = winners
-- `winner_threshold`, `winner_min_spend`, `window_days` — DEPRECATED. If present in config, emit a warning and ignore. Do not crash.
+**HEALTHY:** Meaning: "Producing winners at {recent_avg_hit_rate:.1f}% hit rate vs. the Motion {motion_benchmark:.1f}% benchmark for {spend_tier}-tier accounts." Action: "Keep current creative testing cadence. Push toward top-quartile benchmark."
 
-**Calculations:**
+**WARNING — below benchmark:** Meaning: "Hit rate {recent_avg_hit_rate:.1f}% is below the Motion {motion_benchmark:.1f}% benchmark for {spend_tier}-tier. More concepts launching with zero conversions than expected." Action: "Audit last 2 months of launched concepts — identify the shared failure pattern (wrong hook, format, or audience). Brief replacements."
 
-Step 1 — Assign each concept its true launch month using `concept_first_launch_months`.
+**WARNING — declining:** Meaning: "Hit rate dropped from {prior_avg_hit_rate:.1f}% to {recent_avg_hit_rate:.1f}%. High throughput with low win rate recently." Action: "Review concepts launched in the declining months — identify what changed and brief the corrective direction."
 
-Step 2 — Build calendar-month windows (6 months, non-overlapping, one per calendar month):
-Each window = one calendar month M. Assign each concept in `concept_aggregates` to its `first_launch_month`.
+**CRITICAL:** Meaning: "No winning concepts in the last two scoreable months. Hit rate {recent_avg_hit_rate:.1f}% against a {motion_benchmark:.1f}% benchmark." Action: "Halt current creative direction. Brief 5 genuinely new angles — different hook, format, and opener — this week."
 
-Step 3 — Score each window:
-```
-For each calendar month M:
-  concepts   = all concepts where first_launch_month == M
-  converted  = [c for c in concepts if c.conversions ≥ 1]
-  zero_conv  = [c for c in concepts if c.conversions == 0]
+**INSUFFICIENT_DATA:** Meaning: "Need ≥3 concepts launched in at least 2 calendar months to compute trend. More data needed." Action: "Keep launching. Re-run after more months mature."
 
-  if len(concepts) < 3: scoreable = false; hit_rate = null
-
-  elif not converted: hit_rate = 0.0; winners = []
-
-  else:
-    sort converted by CPA ascending
-    idx = floor(winner_top_percentile × len(converted))
-    cpa_threshold = converted[idx].cpa
-    winners = [c for c in converted if c.cpa ≤ cpa_threshold]
-    hit_rate = len(winners) / len(concepts) × 100
-```
-**The denominator is `len(concepts)` — ALL concepts launched that month, including zero-conversion ones.** No spend gate. Every concept the team put in market is a launch decision that counts.
-
-Step 4 — Verdict vs Motion benchmark (not tautological percentile target):
-```
-target = motion_avg_hit_rate_for_context  (e.g. 8.13% for Medium-tier Finance)
-recent_avg = mean(hit_rate of last 2 scoreable months)
-prior_avg  = mean(hit_rate of 2 months before that) if ≥ 2 prior exist, else null
-
-CRITICAL:          recent_avg < target × 0.5  OR  zero winners across last 2 scoreable months
-WARNING:           recent_avg < target × 0.8  OR  (prior_avg not null AND recent_avg < prior_avg × 0.8)
-HEALTHY:           recent_avg ≥ target × 0.8
-INSUFFICIENT_DATA: fewer than 2 scoreable months
-```
-
-**Meaning / action copy:**
-- HEALTHY: "Producing winners at {recent_avg:.1f}% hit rate vs Motion {target:.1f}% benchmark. Hit rate stable or improving month-over-month."
-- WARNING — below benchmark: "Hit rate {recent_avg:.1f}% is below the Motion {target:.1f}% benchmark for your tier. More concepts launching with zero conversions than expected."
-- WARNING — declining: "Hit rate dropped from {prior_avg:.1f}% to {recent_avg:.1f}%. Review concepts launched in {recent month} — high throughput with low win rate."
-- CRITICAL — zero winners: "No winning concepts in the last two months. Halt current creative direction; brief 5 net-new angles this week."
-- INSUFFICIENT_DATA: "Need ≥3 concepts launched in at least 2 months to compute trend. Run again after more data matures."
-
-**Dashboard data dict:**
-```json
-{
-  "windows": [
-    {
-      "month": "2026-01",
-      "label": "Jan 2026",
-      "is_partial_month": false,
-      "truncation_warning": false,
-      "concepts_total": 41,
-      "converted_count": 9,
-      "zero_conv_count": 32,
-      "winners": 2,
-      "hit_rate": 4.9,
-      "winner_cpa_threshold": 250.98,
-      "ad_id_count": 82,
-      "duplicate_pct": 50.0,
-      "scoreable": true
-    }
-  ],
-  "winner_top_percentile": 0.20,
-  "recent_avg_hit_rate": 16.25,
-  "prior_avg_hit_rate": 8.35,
-  "motion_benchmark": 8.13,
-  "spend_tier": "Medium",
-  "verdict_reference": "motion"
-}
-```
+**metrics:** Recent hit rate (2mo avg) %, Motion benchmark (tier) %, Prior hit rate % or N/A, Winner mode (target CPA or percentile).
 
 ---
 
 ### Analysis 6: Rolling Reach
 
-**Data used:** `monthly_reach` (from `meta_get_monthly_reach`)
+Read from `data`: `signal_a_fired`, `signal_b_fired`, `prior_avg_cost_pnn`, `recent_avg_cost_pnn`, `trailing_ratio`, `recent_ratio`, `using_fallback`, `calculation_note`, `data_warnings`.
 
-**Calculations:**
+Always include `calculation_note` from the data dict as a note in the markdown report for this analysis.
 
-**Step 0 — Partial month handling:**
-Check whether the most recent month has fewer days elapsed than `days_in_month(M)`. If so, compute `reach_per_day[M] = reach[M] / elapsed_days` and use per-day values for all trend comparisons. Include `is_partial: true` on that month's row and a note in the report. Never compare a partial month's raw total against a full month's raw total.
+**HEALTHY:** Meaning: "Reach costs are stable — cost per net-new person reached has not risen materially in the last 6 months." Action: "Monitor monthly. If cost per net-new rises 20%+ in a single month, check frequency and consider a creative refresh."
 
-**Step 1 — Estimate net-new reach per month:**
-- If M−12 data exists: `net_new_reach[M] = max(reach[M] - reach[M-12] * 0.5, 0)`
-- If M−12 data does not exist: `net_new_reach[M] = reach[M] * 0.7` (fallback)
-- Track whether the fallback was used: `using_fallback = True` if ANY month used 0.7×
-- `net_new_ratio[M] = net_new_reach[M] / reach[M]` (will be exactly 0.70 for every fallback month)
-- `cost_per_net_new[M] = spend[M] / net_new_reach[M]` (skip if net_new_reach is 0 or spend is 0)
+**WARNING — Signal A only:** Meaning: "Cost per net-new person reached rose materially — from ${prior_avg_cost_pnn:,.4f} to ${recent_avg_cost_pnn:,.4f}. Audience may be partially saturated." Action: "Expand targeting — test new audiences, lookalikes, or geos."
 
-**Step 2 — Signal A: Is cost per net-new rising materially?**
-- Take the last 6 active months (exclude the partial month from this window).
-- Split into prior half (oldest 3) and recent half (newest 3).
-- `prior_avg = mean(cost_per_net_new for prior 3 months)`
-- `recent_avg = mean(cost_per_net_new for recent 3 months)`
-- Signal A fires if `recent_avg ≥ prior_avg * 1.20` (≥20% increase).
-- Absolute floor: if `recent_avg < 0.50`, Signal A cannot fire regardless of slope (cost is too cheap for the delta to matter). Max verdict = WARNING if this floor applies.
-- Store: `signal_a_fired: bool`, `prior_avg_cost_pnn: float`, `recent_avg_cost_pnn: float`
+**WARNING — Signal B only:** Meaning: "Net-new audience share dropped from {trailing_ratio:.0%} to {recent_ratio:.0%} — re-exposure to the same audience is increasing." Action: "Introduce new creative to reactivate the audience and reduce repeat exposure."
 
-**Step 3 — Signal B: Is the net-new ratio structurally dropping?**
-- If `using_fallback` is True for all months: Signal B is suppressed. Every ratio will be exactly 0.70 — the formula cannot detect saturation without M−12 data.
-- Otherwise: compute trailing 6-month mean of `net_new_ratio` and most recent 3-month mean.
-- Signal B fires if `recent_3m_ratio ≤ trailing_6m_ratio - 0.05` (≥5 percentage point drop).
-- Store: `signal_b_fired: bool | null` (null = suppressed), `trailing_ratio: float`, `recent_ratio: float`
+**CRITICAL:** Meaning: "Both saturation signals fired: cost per net-new person is rising AND net-new audience share is declining. Audience pool may be significantly saturated." Action: "Immediately expand targeting. Test 2 new cold audiences this week. Reallocate budget from high-frequency placements to prospecting."
 
-**Step 4 — Verdict:**
-| Signal A | Signal B | Verdict |
-|---|---|---|
-| True | True | CRITICAL |
-| True | False | WARNING |
-| False | True | WARNING |
-| False | False | HEALTHY |
-| Either suppressed (all-fallback) | — | INSUFFICIENT_DATA |
+**INSUFFICIENT_DATA:** Meaning: "Reach saturation cannot be measured yet — {calculation_note}" Action: "No action needed now. Re-run after 12 months of historical reach data are available."
 
-If `INSUFFICIENT_DATA`: set verdict to `"INSUFFICIENT_DATA"` and add to `data_warnings`:
-`"Reach saturation cannot be measured — fewer than 12 months of historical reach data available. Re-run after [date 12 months from earliest data point] when M−12 baseline exists."`
-Surface this as a neutral note card in the report, not a CRITICAL or WARNING.
-
-**Step 5 — Report note:**
-Always include a one-liner in the report explaining the calculation method:
-- If all fallback: `"Net-new reach estimated using 0.7× fallback for all N months (no M−12 baseline available)."`
-- If mixed: `"Net-new reach estimated using M−12 overlap formula for N months; 0.7× fallback used for M months where baseline was unavailable."`
-
-**Dashboard data dict:**
-```json
-{
-  "monthly_reach": [
-    {
-      "month": "2025-01",
-      "reach": 0,
-      "net_new_reach": 0,
-      "net_new_ratio": 0.70,
-      "spend": 0.0,
-      "cost_per_net_new": 0.0,
-      "reach_per_day": 0.0,
-      "is_partial": false,
-      "used_fallback": true
-    }
-  ],
-  "signal_a_fired": false,
-  "signal_b_fired": null,
-  "prior_avg_cost_pnn": 0.0,
-  "recent_avg_cost_pnn": 0.0,
-  "trailing_ratio": 0.70,
-  "recent_ratio": 0.70,
-  "using_fallback": true,
-  "calculation_note": "Net-new reach estimated using 0.7× fallback for all 13 months (no M−12 baseline available).",
-  "data_warnings": []
-}
-```
+**metrics:** Signal A (cost rising), Signal B (saturation), prior avg cost/net-new $, recent avg cost/net-new $.
 
 ---
 
-### Analysis 7: Creative Volume vs. Spend (Motion 2026 Benchmarks)
+### Analysis 7: Creative Volume vs. Spend
 
-**Data used:** `concept_first_launch_months` (Shared Step). Spend tier from Analysis 5.
+Read from `data`: `avg_monthly_launches`, `motion_median_monthly`, `motion_top_quartile_monthly`, `vertical`, `tier`, `launch_window`.
 
-**Calculations:**
-1. Count unique concepts launched per calendar month using `concept_first_launch_months`. Each concept is counted once — in its true first-launch month — regardless of how many `ad_id` duplicates exist in `ads_6m`. Do NOT count raw `ad_id` rows from `ads_6m.created_time`.
-2. avg_monthly_launches = mean of last 3 months' concept launch counts.
-3. Look up Motion median weekly volume for user's vertical + tier from `motion-benchmarks.json`.
-   - If value is null (suppressed), fall back to `all_verticals_fallback` for that tier.
-4. Convert weekly to monthly: benchmark_weekly × 4.33.
-5. Top quartile monthly = top_quartile_weekly × 4.33.
-6. Compare: user launches vs median vs top quartile.
-7. Note: Motion median = 50th percentile (average account). Top quartile is the real competitive benchmark. Motion's count methodology reflects intentional creative tests, not ad-object duplications — concept-level counting here aligns with their methodology.
+**HEALTHY:** Meaning: "Launching {avg_monthly_launches:.0f} concepts/month — at or above the Motion median of {motion_median_monthly:.0f}/month for {vertical} × {tier}-tier accounts." Action: "Push toward the top-quartile benchmark of {motion_top_quartile_monthly:.0f} concepts/month to outpace median competitors."
 
-**Verdict:**
-- HEALTHY: avg_monthly_launches ≥ Motion median monthly.
-- WARNING: avg_monthly_launches 50-80% of Motion median monthly.
-- CRITICAL: avg_monthly_launches < 50% of Motion median monthly.
+**WARNING:** Meaning: "Launching {avg_monthly_launches:.0f} concepts/month — below the Motion median of {motion_median_monthly:.0f}/month for {vertical} × {tier}-tier. Testing velocity is below average for your spend level." Action: "Brief additional concepts to close the gap to the {motion_median_monthly:.0f}/month median. Identify whether the bottleneck is brief-writing, production, or approval."
 
-**Additional calculation — tier benchmark table:**
-For all 5 spend tiers, look up `median_weekly_testing_volume[vertical][tier]` from `motion-benchmarks.json` (fall back to `all_verticals_fallback` if null) and convert to monthly. Include this as `tier_benchmark_table` so the chart can show where the user sits across tiers.
+**CRITICAL:** Meaning: "Launching only {avg_monthly_launches:.0f} concepts/month — less than half the Motion median of {motion_median_monthly:.0f}/month for {vertical} × {tier}-tier. At this velocity you won't find winners fast enough to sustain performance." Action: "This is a production capacity problem. Set a minimum target of {motion_median_monthly:.0f} concepts/month immediately and identify the bottleneck."
 
-Also compute:
-- `tier_spend_range`: the human-readable range from `spend_tiers[tier]` in `motion-benchmarks.json`
-- `account_monthly_run_rate`: the account's average monthly spend over the 90d window (from `account_overview`)
-- `launch_window.months`: names of the 3 calendar months used for avg_monthly_launches (e.g. "Feb 2026", "Mar 2026", "Apr 2026 (MTD)")
-- `launch_window.monthly_counts`: the concept-level launch count (unique concepts) for each of those 3 months
-
-**Dashboard data dict:**
-```json
-{
-  "avg_monthly_launches": 0.0,
-  "motion_median_monthly": 0.0,
-  "motion_top_quartile_monthly": 0.0,
-  "vertical": "Finance",
-  "tier": "Medium",
-  "tier_spend_range": "$50K–$200K/month",
-  "account_monthly_run_rate": 72003,
-  "fallback_used": false,
-  "median_cohort_label": "Finance × Medium-tier accounts",
-  "top_quartile_cohort_label": "All verticals × Medium-tier accounts",
-  "top_quartile_is_cross_vertical": true,
-  "launch_window": {
-    "label": "Last 3 calendar months",
-    "months": ["Feb 2026", "Mar 2026", "Apr 2026 (MTD)"],
-    "monthly_counts": [0, 0, 0]
-  },
-  "tier_benchmark_table": [
-    {"tier": "Micro",      "spend_range": "< $10K/month",      "median_monthly": 0.0, "is_current": false},
-    {"tier": "Small",      "spend_range": "$10K–$50K/month",   "median_monthly": 0.0, "is_current": false},
-    {"tier": "Medium",     "spend_range": "$50K–$200K/month",  "median_monthly": 0.0, "is_current": true},
-    {"tier": "Large",      "spend_range": "$200K–$1M/month",   "median_monthly": 0.0, "is_current": false},
-    {"tier": "Enterprise", "spend_range": "$1M+/month",        "median_monthly": 0.0, "is_current": false}
-  ],
-  "benchmark_source": "Motion 2026 Creative Benchmarks (550K+ ads, 6,000+ advertisers, Sep 2025–Jan 2026)",
-  "data_warnings": []
-}
-```
+**metrics:** Avg monthly launches, Motion median (vertical × tier), Motion top quartile, launch window months and counts.
 
 ---
 
----
+### Data Quality Output
 
-## DATA QUALITY PASS (run after all 7 analyses, before writing results.json)
+The `data_quality` block in computed.json is populated by the compute script — do not re-run the LCP algorithm.
 
-### Likely-related concept detection
+If `data_quality.likely_related_concept_clusters` is non-empty: mention these clusters in the markdown report under a **"Data Quality — Likely-related concepts"** section, placed above the Priority Action Stack. The dashboard card renders automatically — no additional action needed.
 
-After `concept_aggregates` is finalized and all 7 analyses have run, perform a prefix-similarity scan to detect concept-name pairs that share a long common prefix but were **not** merged by canonical normalization (i.e., they have different canonical keys — neither is a `" - Copy"` variant of the other).
-
-**Algorithm:**
-For each pair of distinct display names in `concept_aggregates`:
-1. Normalize each name: lowercase, keep only alphanumeric characters (strip hyphens, spaces, punctuation)
-2. Compute their Longest Common Prefix (LCP) on the normalized strings
-3. Flag as "likely related" if: `len(LCP) ≥ 30` AND `len(LCP) / min(len(normalized_a), len(normalized_b)) ≥ 0.60`
-4. Group flagged pairs into clusters (union-find or simple greedy: if A~B and B~C then {A,B,C} is one cluster)
-5. For each cluster, compute `cluster_spend` = sum of member concept spend; include `evidence` = a brief description of why they matched (e.g. "Names share 82 chars of prefix; one is a strict prefix of the other")
-
-Emit the result as a top-level `data_quality` block in `results.json` (sibling to `overview` and `analyses`):
-
-```json
-{
-  "data_quality": {
-    "likely_related_concept_clusters": [
-      {
-        "cluster_spend": 12852.20,
-        "members": [
-          {"name": "IfSomeoneJust...-V6-Video-...", "spend": 9858.84, "ad_id_count": 6,
-           "conversions": 22, "cpa": 448.13},
-          {"name": "IfSomeoneJust...", "spend": 2993.36, "ad_id_count": 1,
-           "conversions": 6, "cpa": 498.89}
-        ],
-        "evidence": "Names share 82 chars of prefix; one is a strict prefix of the other"
-      }
-    ],
-    "total_clusters": 0,
-    "total_spend_in_clusters": 0.0,
-    "spend_pct_of_total": 0.0
-  }
-}
-```
-
-If no clusters are found, emit `data_quality` with an empty `likely_related_concept_clusters` list and zeroed totals. **Never omit the `data_quality` key** — the dashboard checks for its presence.
+If the list is empty: omit the section from the markdown report entirely.
 
 ---
 
@@ -725,46 +384,26 @@ If no clusters are found, emit `data_quality` with an empty `likely_related_conc
 
 ### Step 1: Write results.json
 
-Create directory `~/meta-diagnostics/` if it doesn't exist.
+Load `~/meta-diagnostics/computed.json`. For each analysis entry, fill in the copy you wrote in Phase 4:
+- `meaning`: the one-sentence plain-English meaning
+- `action`: the one specific next step
+- `metrics`: key numbers dict for the markdown report
 
-Write `~/meta-diagnostics/results.json` with this structure:
-```json
-{
-  "run_date": "YYYY-MM-DD",
-  "config": { ...config values... },
-  "overview": {
-    "spend": "216029.38",
-    "active_ads": 151,
-    "date_range": "last_90_days"
-  },
-  "data_quality": { ...as specified in Data Quality Pass above... },
-  "analyses": [
-    {
-      "id": "test_and_learn",
-      "title": "Test & Learn Spend Optimization",
-      "verdict": "CRITICAL",
-      "meaning": "...",
-      "action": "...",
-      "metrics": { ...key numbers... },
-      "data": { ...chart data dict... }
-    }
-  ]
-}
+All other fields (`id`, `title`, `verdict`, `data`, `run_date`, `config`, `overview`, `data_quality`) come from `computed.json` unchanged — **do not recompute or modify them**.
+
+Write the assembled object to `~/meta-diagnostics/results.json`.
+
+**Key contracts (already enforced by _run_analyses.py — do not override):**
+- `overview.spend` is a raw numeric string — do not reformat
+- `id` fields are already correct — do not change them
+- Analysis order: test_and_learn → creative_allocation → old_creative → creative_churn → slugging_rate → rolling_reach → volume_vs_spend
+
+**`_run_analyses.py` script failure handling:**
+If the script was not found or failed, tell the user:
 ```
-
-**Contract: `overview.spend` must be a raw numeric string with no currency symbol or commas** — e.g. `"216029.38"`, NOT `"$216,029"` or `"216,029.38 USD"`. The dashboard calls `float()` on this value directly and will crash on formatted strings.
-
-Include all 7 analyses in order. Each analysis MUST include an `id` field — the dashboard keys its chart renderer off this value, not the title. Use exactly these ids:
-
-| # | id | title (can be any human-readable string) |
-|---|---|---|
-| 1 | `test_and_learn` | Test & Learn Spend Optimization |
-| 2 | `creative_allocation` | Creative Allocation |
-| 3 | `old_creative` | Reliance on Old Creative |
-| 4 | `creative_churn` | Creative Churn |
-| 5 | `slugging_rate` | Production & Slugging Rate |
-| 6 | `rolling_reach` | Rolling Reach |
-| 7 | `volume_vs_spend` | Creative Volume vs. Spend (Motion 2026 Benchmarks) |
+The compute script encountered an error: [error details]
+To fix: run `bash install.sh` from the meta-account-diagnostics repo root, then re-run /meta-diagnostics.
+```
 
 ### Step 2: Write Markdown report
 
@@ -812,7 +451,7 @@ HEALTHY — keep doing
 
 ### Step 3: Generate dashboard.py
 
-Copy the template from the skill's `templates/dashboard_template.py` to `~/meta-diagnostics/dashboard.py`.
+Copy `{skill_dir}/templates/dashboard_template.py` to `~/meta-diagnostics/dashboard.py`, where `{skill_dir}` is the directory containing this SKILL.md file. To find the skill directory, run: `find ~/.claude -name "SKILL.md" -path "*/meta-diagnostics/*" | head -1 | xargs dirname`
 
 The template reads from `results.json` at runtime — no modification is needed.
 
@@ -866,6 +505,13 @@ If some months have reach = 0, use them as-is. Note in the report: "Months with 
 
 **Suppressed Motion benchmark:**
 "Your vertical ({vertical}) at {tier} tier has a suppressed benchmark in the Motion 2026 report (insufficient sample size). Using the all-verticals average for your tier: {fallback_value} creatives/week."
+
+**`_run_analyses.py` not found or fails:**
+"The compute script could not be found or failed to run. To fix:
+1. Run `bash install.sh` from the root of the meta-account-diagnostics repo.
+2. Then re-run /meta-diagnostics.
+Error details: [paste the error message]"
+Do not attempt to run analyses without the compute script — do not fall back to in-context computation.
 
 ---
 
