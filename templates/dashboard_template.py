@@ -681,19 +681,19 @@ def priority_action_stack(analyses: list[dict]):
     if criticals:
         st.markdown("### 🔴 CRITICAL — do this week")
         for title, action in criticals[:2]:
-            st.markdown(f"**{rank}. [{title}]** {action}")
+            st.markdown(f"**{rank}. [{title}]** {_safe_md(action)}")
             rank += 1
 
     if warnings:
         st.markdown("### 🟡 WARNING — do this month")
         for title, action in warnings[:2]:
-            st.markdown(f"**{rank}. [{title}]** {action}")
+            st.markdown(f"**{rank}. [{title}]** {_safe_md(action)}")
             rank += 1
 
     if healthies:
         st.markdown("### 🟢 HEALTHY — keep doing")
         for title, action in healthies[:1]:
-            st.markdown(f"**{rank}. [{title}]** {action}")
+            st.markdown(f"**{rank}. [{title}]** {_safe_md(action)}")
 
 
 def main():
