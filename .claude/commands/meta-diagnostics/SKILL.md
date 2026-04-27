@@ -318,7 +318,7 @@ If `data_warnings` non-empty: prepend "Note: [first warning]. " to meaning.
 
 ---
 
-### Analysis 5: Production & Slugging Rate
+### Analysis 5: Hit Rate
 
 Read from `data`: `recent_avg_hit_rate`, `prior_avg_hit_rate`, `motion_benchmark`, `spend_tier`, `target_cpa_mode`, `windows`.
 

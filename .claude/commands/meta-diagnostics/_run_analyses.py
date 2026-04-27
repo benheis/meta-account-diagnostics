@@ -1315,7 +1315,7 @@ def main():
             },
             {
                 'id': 'slugging_rate',
-                'title': 'Production & Slugging Rate',
+                'title': 'Hit Rate',
                 'verdict': a5['verdict'],
                 'meaning': '',
                 'action': '',

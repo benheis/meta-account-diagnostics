@@ -52,6 +52,20 @@ VERDICT_BG = {
     "INSUFFICIENT_DATA": "#f3f4f6",
 }
 
+DARK_MODE_CSS = """
+<style>
+@media (prefers-color-scheme: dark) {
+    .verdict-card { border-color: rgba(255,255,255,0.12) !important; }
+    .verdict-card h3 { color: #f1f5f9 !important; }
+    .verdict-critical          { background: rgba(239,68,68,0.15)   !important; }
+    .verdict-warning           { background: rgba(245,158,11,0.15)  !important; }
+    .verdict-healthy           { background: rgba(34,197,94,0.15)   !important; }
+    .verdict-insufficient_data { background: rgba(107,114,128,0.15) !important; }
+    [data-testid="stDataFrame"] { background: rgba(255,255,255,0.04) !important; }
+}
+</style>
+"""
+
 
 def load_results() -> dict:
     if not RESULTS_PATH.exists():
@@ -68,8 +82,9 @@ def verdict_badge(verdict: str) -> str:
 
 def analysis_card(title: str, verdict: str, meaning: str, action: str, chart_fn):
     bg = VERDICT_BG.get(verdict, "#f9fafb")
+    verdict_class = f"verdict-{verdict.lower()}"
     st.markdown(f"""
-<div style="border:1px solid #e5e7eb;border-radius:8px;padding:20px;margin-bottom:20px;background:{bg}">
+<div class="verdict-card {verdict_class}" style="border:1px solid #e5e7eb;border-radius:8px;padding:20px;margin-bottom:20px;background:{bg}">
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
 <h3 style="margin:0;font-size:16px">{title}</h3>
 {verdict_badge(verdict)}
@@ -314,6 +329,11 @@ def chart_old_creative(data: dict):
 def chart_creative_churn(data: dict):
     cohorts = data.get("cohort_spend_by_month", [])
     warnings = data.get("data_warnings", [])
+    st.caption(
+        "Newer cohorts should progressively take spend share from older ones as they prove out. "
+        "If older cohorts continue dominating month after month, creative is aging without replacement "
+        "— a leading indicator of audience fatigue."
+    )
     if not cohorts:
         msg = warnings[0] if warnings else "Cohort spend data unavailable — rerun the diagnostic with meta_get_ad_monthly_spend connected."
         st.info(msg)
@@ -451,12 +471,22 @@ def chart_slugging_rate(data: dict):
                 "Hit Rate": f"{w['hit_rate']:.1f}%" if w.get("hit_rate") is not None else "—",
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.caption(
+        "A healthy account consistently produces new winners each month. "
+        "Declining hit rate or zero winners for 2+ months signals the current creative direction isn't working "
+        "— brief new angles, don't iterate on what's failing."
+    )
 
 
 def chart_rolling_reach(data: dict):
     monthly = data.get("monthly_reach", [])
     warnings = data.get("data_warnings", [])
     calc_note = data.get("calculation_note", "")
+    st.caption(
+        "Two signals detect audience saturation: (1) rising cost to reach a net-new person, and "
+        "(2) declining share of reach going to people who haven't seen your ads before. "
+        "Either signal alone is a warning; both together is critical."
+    )
 
     if not monthly:
         st.info("No reach data available.")
@@ -492,6 +522,7 @@ def chart_rolling_reach(data: dict):
 
     fig.update_layout(
         barmode="group", title="", height=360, margin=dict(t=10, b=10),
+        xaxis_title="Month",
         yaxis2=dict(
             overlaying="y", side="right",
             title="Cost / Net-New Reach (USD)",
@@ -543,6 +574,10 @@ def chart_volume_vs_spend(data: dict):
     window_months = launch_window.get("months", [])
     monthly_counts = launch_window.get("monthly_counts", [])
 
+    st.caption(
+        "Your launch volume compared against Motion's 2026 benchmarks for your vertical × spend tier. "
+        "The median bar is your baseline — being below it means competitors at your spend level are testing faster."
+    )
     if fallback_used:
         st.warning(f"⚠️ {vertical} benchmark suppressed for {tier} tier (insufficient sample). Showing all-verticals median instead.")
 
@@ -663,6 +698,7 @@ def priority_action_stack(analyses: list[dict]):
 
 def main():
     st.set_page_config(page_title="Meta Account Diagnostics", layout="wide")
+    st.markdown(DARK_MODE_CSS, unsafe_allow_html=True)
 
     results = load_results()
     config = results.get("config", {})
@@ -675,6 +711,8 @@ def main():
     st.subheader(f"Optimizing for: {conv_event} ({conv_label})")
 
     analyses = results.get("analyses", [])
+
+    priority_action_stack(analyses)
     n_critical = sum(1 for a in analyses if a["verdict"] == "CRITICAL")
     n_warning  = sum(1 for a in analyses if a["verdict"] == "WARNING")
     n_healthy  = sum(1 for a in analyses if a["verdict"] == "HEALTHY")
@@ -722,7 +760,6 @@ def main():
 
     data_quality = results.get("data_quality", {})
     render_data_quality_card(data_quality)
-    priority_action_stack(analyses)
 
 
 if __name__ == "__main__":
