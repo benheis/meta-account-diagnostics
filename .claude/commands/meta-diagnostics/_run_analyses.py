@@ -82,6 +82,89 @@ def load_json(path: str, default):
         return default
 
 
+def _find_conversions(cost_per_action_type: list, conversion_event: str, spend: float) -> float:
+    """Derive conversion count from Meta's cost_per_action_type list using spend / CPA."""
+    if not cost_per_action_type or not conversion_event:
+        return 0.0
+    event_lower = conversion_event.lower()
+    for entry in cost_per_action_type:
+        action_type = str(entry.get('action_type', '')).lower()
+        if event_lower in action_type or action_type in event_lower:
+            cpa_val = safe_float(entry.get('value', 0))
+            if cpa_val > 0:
+                return round(spend / cpa_val, 4)
+    return 0.0
+
+
+def normalize_ads_response(raw, conversion_event: str) -> list:
+    """Accept bare list or MCP envelope {"ads": [...], "since": ..., "until": ...}.
+    Derives flat conversions from cost_per_action_type when present."""
+    if isinstance(raw, list):
+        ads = raw
+    elif isinstance(raw, dict):
+        ads = raw.get('ads', [])
+        if not isinstance(ads, list):
+            return []
+    else:
+        return []
+
+    out = []
+    for ad in ads:
+        if not isinstance(ad, dict):
+            continue
+        normalized = dict(ad)
+        # Map ad_name -> name if name is absent
+        if 'name' not in normalized and 'ad_name' in normalized:
+            normalized['name'] = normalized['ad_name']
+        # Derive conversions from cost_per_action_type if flat conversions absent
+        if 'conversions' not in normalized:
+            spend = safe_float(normalized.get('spend', 0))
+            cpa_list = normalized.get('cost_per_action_type', [])
+            normalized['conversions'] = _find_conversions(cpa_list, conversion_event, spend)
+        # Strip timezone suffix from created_time for safe string slicing downstream
+        ct = normalized.get('created_time', '')
+        if ct and ('+' in ct or ct.endswith('Z')):
+            normalized['created_time'] = ct.replace('Z', '').split('+')[0].strip()
+        out.append(normalized)
+    return out
+
+
+def normalize_reach_response(raw) -> list:
+    """Accept bare list or MCP envelope {"months": [...], "count": N}."""
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, dict):
+        months = raw.get('months', [])
+        return months if isinstance(months, list) else []
+    return []
+
+
+def normalize_monthly_spend_response(raw) -> list:
+    """Accept bare list or MCP envelope {"ads": [{ad_name, monthly_spend: [{month, spend}]}]}.
+    Flattens nested monthly_spend into one row per ad-month."""
+    if isinstance(raw, list):
+        return raw
+    if not isinstance(raw, dict):
+        return []
+    ads = raw.get('ads', [])
+    if not isinstance(ads, list):
+        return []
+    rows = []
+    for ad in ads:
+        if not isinstance(ad, dict):
+            continue
+        name = ad.get('ad_name') or ad.get('name', '')
+        for entry in (ad.get('monthly_spend') or []):
+            if not isinstance(entry, dict):
+                continue
+            rows.append({
+                'name': name,
+                'month': entry.get('month', ''),
+                'spend': entry.get('spend', '0'),
+            })
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Shared Step — concept map building
 # ---------------------------------------------------------------------------
@@ -262,16 +345,21 @@ def run_a2(concept_aggregates_90d: dict, config: dict) -> dict:
     if not concept_aggregates_90d:
         return {'verdict': 'INSUFFICIENT_DATA', 'data': {
             'ads': [], 'top_1pct_spend_pct': 0.0, 'top_10pct_spend_pct': 0.0,
-            'sub_threshold_spend_pct': 0.0, 'allocation_min_spend': allocation_min, 'budget_waste_signal': 0.0,
+            'sub_threshold_spend_pct': 0.0, 'allocation_min_spend': allocation_min,
+            'effective_rank_floor': allocation_min, 'budget_waste_signal': 0.0,
         }}
 
     total_spend = sum(c['spend'] for c in concept_aggregates_90d.values())
+    # Relative floor: must commit at least 1% of total account spend to qualify for percentile ranking.
+    # Prevents micro-spend outliers with lucky CPAs from displacing scaled winners in Top 1%/10%.
+    rank_floor = max(allocation_min, total_spend * 0.01)
+
     ranked, sub_threshold, unranked = [], [], []
 
     for name, c in concept_aggregates_90d.items():
         entry = {'name': name, 'spend': c['spend'], 'cpa': c['cpa'],
                  'conversions': c['conversions'], 'ad_id_count': c['ad_id_count']}
-        if c['cpa'] > 0 and c['conversions'] >= 1 and c['spend'] >= allocation_min:
+        if c['cpa'] > 0 and c['conversions'] >= 1 and c['spend'] >= rank_floor:
             ranked.append(entry)
         elif c['cpa'] > 0 and c['conversions'] >= 1:
             sub_threshold.append(entry)
@@ -285,18 +373,6 @@ def run_a2(concept_aggregates_90d: dict, config: dict) -> dict:
     top_1_count = math.ceil(0.01 * n) if n > 0 else 0
     top_10_count = math.ceil(0.10 * n) if n > 0 else 0
 
-    ads_out = []
-    for i, entry in enumerate(ranked):
-        if i < top_1_count:
-            tier = 'Top 1%'
-        elif i < top_10_count:
-            tier = 'Top 10%'
-        else:
-            tier = 'Top 10%' if top_10_count == 0 else 'Other (ranked)'
-        entry['tier'] = tier
-        ads_out.append(entry)
-
-    # Fix: re-assign tiers properly
     ads_out = []
     for i, entry in enumerate(ranked):
         if i < top_1_count:
@@ -362,7 +438,8 @@ def run_a2(concept_aggregates_90d: dict, config: dict) -> dict:
             'top_1pct_spend_pct': top_1pct_spend_pct,
             'top_10pct_spend_pct': top_10pct_spend_pct,
             'sub_threshold_spend_pct': sub_threshold_spend_pct,
-            'allocation_min_spend': allocation_min,
+            'allocation_min_spend': round(allocation_min, 2),
+            'effective_rank_floor': round(rank_floor, 2),
             'budget_waste_signal': budget_waste_signal,
         },
     }
@@ -1152,21 +1229,16 @@ def main():
               'Run install.sh to reinstall the skill.', file=sys.stderr)
         sys.exit(1)
 
-    # Load raw data
-    ads_90d = load_json(os.path.join(raw_dir, 'ads_90d.json'), [])
-    ads_6m = load_json(os.path.join(raw_dir, 'ads_6m.json'), [])
-    monthly_reach_raw = load_json(os.path.join(raw_dir, 'monthly_reach.json'), [])
+    # Load and normalize raw data — handles both bare lists and MCP envelope shapes
+    ads_90d = normalize_ads_response(
+        load_json(os.path.join(raw_dir, 'ads_90d.json'), []), conversion_event)
+    ads_6m = normalize_ads_response(
+        load_json(os.path.join(raw_dir, 'ads_6m.json'), []), conversion_event)
+    monthly_reach_raw = normalize_reach_response(
+        load_json(os.path.join(raw_dir, 'monthly_reach.json'), []))
     account_overview = load_json(os.path.join(raw_dir, 'account_overview.json'), {})
-    ad_monthly_spend = load_json(os.path.join(raw_dir, 'ad_monthly_spend.json'), [])
-
-    if not isinstance(ads_90d, list):
-        ads_90d = []
-    if not isinstance(ads_6m, list):
-        ads_6m = []
-    if not isinstance(ad_monthly_spend, list):
-        ad_monthly_spend = []
-    if not isinstance(monthly_reach_raw, list):
-        monthly_reach_raw = []
+    ad_monthly_spend = normalize_monthly_spend_response(
+        load_json(os.path.join(raw_dir, 'ad_monthly_spend.json'), []))
 
     # Build concept maps
     concept_aggregates, concept_first_launch_months, name_to_concept = build_concept_maps(ads_6m)

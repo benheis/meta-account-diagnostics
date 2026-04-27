@@ -242,13 +242,13 @@ def chart_creative_allocation(data: dict):
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    floor = data.get("allocation_min_spend", 500)
+    floor_min = data.get("allocation_min_spend", 500)
+    rank_floor = data.get("effective_rank_floor", floor_min)
     st.caption(
-        f"Ranking pool includes only concepts with ≥ ${floor:,.0f} lifetime spend "
-        f"(statistical-significance gate). Ads below this threshold are tagged "
-        f"\"Other (untested)\". To change this floor for your business — e.g. $100 "
-        f"for low-CAC accounts or $2,000 for high-CAC accounts — tell the AI: "
-        f"\"rerun /meta-diagnostics with allocation_min_spend = 1000\"."
+        f"Ranking pool includes only concepts with ≥ ${rank_floor:,.0f} lifetime spend "
+        f"(1% of total account spend, or ${floor_min:,.0f} minimum — whichever is higher). "
+        f"Ads below this threshold are tagged \"Other (untested)\". "
+        f"To change the minimum floor — tell the AI: \"rerun /meta-diagnostics with allocation_min_spend = 1000\"."
     )
 
 
