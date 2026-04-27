@@ -246,7 +246,7 @@ def chart_creative_allocation(data: dict):
     rank_floor = data.get("effective_rank_floor", floor_min)
     st.caption(
         f"Ranking pool includes only concepts with ≥ ${rank_floor:,.0f} lifetime spend "
-        f"(1% of total account spend, or ${floor_min:,.0f} minimum — whichever is higher). "
+        f"(0.5% of total account spend, or ${floor_min:,.0f} minimum — whichever is higher). "
         f"Ads below this threshold are tagged \"Other (untested)\". "
         f"To change the minimum floor — tell the AI: \"rerun /meta-diagnostics with allocation_min_spend = 1000\"."
     )

@@ -26,7 +26,7 @@ So that a $600 ad with one lucky conversion doesn't outrank a $50K scaled winner
 **Background:**
 Story 2 (PR 3) introduced `allocation_min_spend` (default $500) as the ranked pool gate for A2. This correctly excludes zero-spend concepts but still admits low-spend outliers into the percentile competition. On a real account run, a concept with $600 spend and one conversion at $45 CPA ranks as Top 1% — pushing the actual scaled winners ($20K–$50K spend) into "Other (ranked)" and collapsing `top_10pct_spend_pct` to ~1–2%. The HEALTHY threshold is `top_10pct_spend_pct > 50%` which reflects the correct target: half the budget should be on your best CPA concepts. The problem is the ranked pool population, not the threshold.
 
-The fix: gate the percentile ranking pool at `max(allocation_min_spend, 1% of total account spend)`. This is a relative floor that scales with account size — on a $72K account it's ~$720 (minimal change), on a $500K account it's $5,000 (excludes micro-tests from ranking), on a $1M account it's $10,000.
+The fix: gate the percentile ranking pool at `max(allocation_min_spend, 0.5% of total account spend)`. This is a relative floor that scales with account size — on a $72K account it's ~$720 (minimal change), on a $500K account it's $5,000 (excludes micro-tests from ranking), on a $1M account it's $10,000.
 
 Concepts above `allocation_min_spend` but below the 1% floor are tagged `"Other (untested)"` — they've been tested but not committed enough to rank. This is the honest label.
 
@@ -38,7 +38,7 @@ Concepts above `allocation_min_spend` but below the 1% floor are tagged `"Other 
 
 1. After computing `total_spend`, compute the effective ranking floor:
    ```python
-   rank_floor = max(allocation_min, total_spend * 0.01)
+   rank_floor = max(allocation_min, total_spend * 0.005)
    ```
 
 2. Ranked pool gate changes from `spend >= allocation_min` to `spend >= rank_floor`:
@@ -70,7 +70,7 @@ Concepts above `allocation_min_spend` but below the 1% floor are tagged `"Other 
    floor_display = data.get("allocation_min_spend", 500)
    st.caption(
        f"Ranking pool includes only concepts with ≥ ${rank_floor:,.0f} lifetime spend "
-       f"(1% of total account spend, or ${floor_display:,.0f} minimum — whichever is higher). "
+       f"(0.5% of total account spend, or ${floor_display:,.0f} minimum — whichever is higher). "
        f"Ads below this threshold are tagged \"Other (untested)\". "
        f"To change the minimum floor — tell the AI: \"rerun /meta-diagnostics with allocation_min_spend = 1000\"."
    )
@@ -80,7 +80,7 @@ Concepts above `allocation_min_spend` but below the 1% floor are tagged `"Other 
 
 ### Quality Requirements
 
-7. On a real account run: `top_10pct_spend_pct` reflects the spend concentration on the lowest-CPA concepts that have each committed ≥ 1% of total account spend
+7. On a real account run: `top_10pct_spend_pct` reflects the spend concentration on the lowest-CPA concepts that have each committed ≥ 0.5% of total account spend
 8. Verified: a concept with `spend < 1% of total_spend` never appears as "Top 1%" or "Top 10%"
 9. Verified: `effective_rank_floor` in the data dict equals `max(allocation_min_spend, total_spend * 0.01)` — spot-check against account total spend
 10. Caption dollar value matches `effective_rank_floor`, not the raw config floor
@@ -119,13 +119,14 @@ Also update the `INSUFFICIENT_DATA` early-return dict to include `effective_rank
 
 **Scale examples:**
 
-| Account 90d spend | 1% floor | effective_rank_floor (if allocation_min=$500) |
+| Account 90d spend | 0.5% floor | effective_rank_floor (if allocation_min=$500) |
 |---|---|---|
-| $30,000 | $300 | $500 (allocation_min wins) |
-| $72,000 | $720 | $720 |
-| $150,000 | $1,500 | $1,500 |
-| $500,000 | $5,000 | $5,000 |
-| $1,000,000 | $10,000 | $10,000 |
+| $30,000 | $150 | $500 (allocation_min wins) |
+| $72,000 | $360 | $500 (allocation_min wins) |
+| $100,000 | $500 | $500 (tied) |
+| $150,000 | $750 | $750 |
+| $500,000 | $2,500 | $2,500 |
+| $1,000,000 | $5,000 | $5,000 |
 
 ---
 

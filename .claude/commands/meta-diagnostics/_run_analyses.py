@@ -352,7 +352,7 @@ def run_a2(concept_aggregates_90d: dict, config: dict) -> dict:
     total_spend = sum(c['spend'] for c in concept_aggregates_90d.values())
     # Relative floor: must commit at least 1% of total account spend to qualify for percentile ranking.
     # Prevents micro-spend outliers with lucky CPAs from displacing scaled winners in Top 1%/10%.
-    rank_floor = max(allocation_min, total_spend * 0.01)
+    rank_floor = max(allocation_min, total_spend * 0.005)
 
     ranked, sub_threshold, unranked = [], [], []
 
