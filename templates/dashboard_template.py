@@ -547,10 +547,11 @@ def chart_volume_vs_spend(data: dict):
         st.warning(f"⚠️ {vertical} benchmark suppressed for {tier} tier (insufficient sample). Showing all-verticals median instead.")
 
     run_rate_str = f"~${run_rate/1000:.0f}K/mo" if run_rate else ""
+    safe_tier_range = _safe_md(tier_range)
     bar_labels = [
         f"Your Launches<br>{run_rate_str}",
-        f"{vertical} Median<br>{tier_range} cohort",
-        f"Cross-Vertical Top Quartile<br>{tier_range} cohort",
+        f"{vertical} Median<br>{safe_tier_range} cohort",
+        f"Cross-Vertical Top Quartile<br>{safe_tier_range} cohort",
     ]
     fig = go.Figure()
     fig.add_bar(name="Your Launches", x=[bar_labels[0]], y=[your_launches],
@@ -563,7 +564,7 @@ def chart_volume_vs_spend(data: dict):
 
     fig.update_layout(
         title=dict(
-            text=f"{window_label} vs Motion 2026 benchmarks · {tier} tier ({tier_range})",
+            text=f"{window_label} vs Motion 2026 benchmarks · {tier} tier ({safe_tier_range})",
             font=dict(size=13),
         ),
         height=320, margin=dict(t=40, b=10),
@@ -592,8 +593,9 @@ def chart_volume_vs_spend(data: dict):
         rows = []
         for row in tier_table:
             marker = " ← you" if row.get("is_current") else ""
+            spend_range = _safe_md(str(row.get("spend_range", "")))
             rows.append({
-                "Spend tier": f"{row['tier']} ({row['spend_range']}){marker}",
+                "Spend tier": f"{row['tier']} ({spend_range}){marker}",
                 f"{vertical} median (monthly)": f"{row['median_monthly']:.0f}" if row.get('median_monthly') else "—",
             })
         st.table(rows)
@@ -616,7 +618,7 @@ def render_data_quality_card(data_quality: dict):
         members = cluster.get("members", [])
         combined = cluster.get("cluster_spend", 0)
         evidence = cluster.get("evidence", "")
-        st.markdown(f"**Combined spend: ${combined:,.0f}** · _{evidence}_")
+        st.markdown(f"**Combined spend: \\${combined:,.0f}** · _{evidence}_")
         rows = [
             {"Concept": m["name"], "Spend": f"${m['spend']:,.0f}",
              "CPA": f"${m['cpa']:,.0f}" if m.get("cpa") else "—",
