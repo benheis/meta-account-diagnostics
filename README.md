@@ -18,7 +18,9 @@ This skill needs access to your Meta Ads data. It's designed to work with any MC
 - `meta_get_monthly_reach` — per-month reach, impressions, and spend
 - `meta_get_ad_monthly_spend` — per-ad monthly spend breakdown (used for cohort churn analysis)
 
-**Recommended:** [ads-mcp-connector](https://github.com/benheis/ads-mcp-connector) — a free, open-source MCP server that connects Claude to live Meta Ads (and Google Ads) data. If you already have it set up, you're ready to go. If not, run `/ads-connect` in Claude Code to get connected in a few minutes.
+**Recommended: Meta CLI** — Meta's official CLI tool for connecting your ad account data directly to AI agents like Claude Code and Cursor. Install it, authenticate, and you're ready.
+
+**Alternative:** [ads-mcp-connector](https://github.com/benheis/ads-mcp-connector) — a free, open-source MCP server that also exposes the required tools. If you already have it set up, you're good to go. Run `/ads-connect` in Claude Code if you need to connect.
 
 You can also bring your own MCP server or data layer — as long as it surfaces the tools above, the skill will work.
 

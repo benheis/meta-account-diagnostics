@@ -4,7 +4,7 @@ description: >
   Full Meta Ads account audit in one command. Runs 7 diagnostic analyses using
   proven Meta advertising frameworks and Motion 2026 Creative Benchmarks. Generates a
   Markdown report saved locally and auto-launches an interactive Streamlit dashboard.
-  Requires an MCP server with Meta Ads access (ads-mcp-connector recommended).
+  Requires an MCP server with Meta Ads access. Works with the Meta CLI (recommended) or ads-mcp-connector.
   Triggers: /meta-diagnostics, "run meta audit", "diagnose my Meta ads",
   "Meta account health check", "check my Meta account", "run the meta diagnostic".
 ---
@@ -162,8 +162,9 @@ Call `check_connection`.
 
 Look at the `meta` key in the response. If `connected` is false or there's an error:
 ```
-Your Meta Ads account isn't connected. Run /ads-connect first to link your Meta account,
-then come back and run /meta-diagnostics again.
+Your Meta Ads account isn't connected. Set up the Meta CLI to connect your account,
+then come back and run /meta-diagnostics again. (Already using ads-mcp-connector?
+Run /ads-connect first instead.)
 ```
 Stop here if Meta is not connected.
 
