@@ -4,7 +4,8 @@ description: >
   Full Meta Ads account audit in one command. Runs 7 diagnostic analyses using
   proven Meta advertising frameworks and Motion 2026 Creative Benchmarks. Generates a
   Markdown report saved locally and auto-launches an interactive Streamlit dashboard.
-  Requires an MCP server with Meta Ads access. Works with the Meta CLI (recommended) or ads-mcp-connector.
+  Uses the Meta Ads CLI (`pip install meta-ads`). Authenticate with `meta auth login`
+  (browser OAuth — no token needed). The CLI is called directly via Bash; no MCP server required.
   Triggers: /meta-diagnostics, "run meta audit", "diagnose my Meta ads",
   "Meta account health check", "check my Meta account", "run the meta diagnostic".
 ---
@@ -44,12 +45,17 @@ If missing: run `python3 -m ensurepip --upgrade` and confirm it succeeded.
 ### Step 3: Required libraries
 Run: `python3 -c "import streamlit, plotly, pandas, requests"`
 
-If any ImportError: run `python3 -m pip install streamlit plotly pandas requests`
+If any ImportError:
+- First try: `python3 -m pip install streamlit plotly pandas requests`
+- If that fails with a `pyexpat` or system-packages error, try: `python3.13 -m pip install streamlit plotly pandas requests --break-system-packages`
+- Verify with whichever python version succeeded: store it as `PYTHON_BIN` (e.g. `python3` or `python3.13`) — use this for all subsequent python invocations in the skill.
+
 Tell the user: "Installing the dashboard libraries — this takes about 30 seconds..."
 Wait for the install to finish.
 
 ### Step 4: Mark deps as checked
 Save `~/.meta-diagnostics-config.json` with `"deps_checked": true` (merge with any existing config).
+Also store `PYTHON_BIN` in memory for this session — default to `python3`, override to `python3.13` if python3 had import errors.
 
 ---
 
@@ -158,15 +164,16 @@ Write all values to `~/.meta-diagnostics-config.json`:
 
 ## PHASE 2 — CONNECTION CHECK
 
-Call `check_connection`.
+The Meta CLI authenticates via browser OAuth (`meta auth login`) — no tokens or env vars needed.
 
-Look at the `meta` key in the response. If `connected` is false or there's an error:
+Run: `meta auth status`
+
+If exit code is non-zero OR output contains "Not authenticated":
 ```
-Your Meta Ads account isn't connected. Set up the Meta CLI to connect your account,
-then come back and run /meta-diagnostics again. (Already using ads-mcp-connector?
-Run /ads-connect first instead.)
+Your Meta Ads account isn't connected. Run `meta auth login` in your terminal — it will
+open a browser window for Meta Business OAuth. Once authenticated, re-run /meta-diagnostics.
 ```
-Stop here if Meta is not connected.
+Stop here if not authenticated.
 
 Confirm to the user: "Meta is connected. Pulling your account data now..."
 
@@ -174,45 +181,196 @@ Confirm to the user: "Meta is connected. Pulling your account data now..."
 
 ## PHASE 3 — DATA PULL
 
-Pull all data in one pass. Reference the stored `account_id` from config.
+Data is pulled using the `meta` CLI directly via Bash. The CLI option `--ad-account-id` lives on the
+`meta ads` parent command, so the syntax is: `meta ads --ad-account-id ACCOUNT_ID insights get ...`
 
-Create the raw data directory before writing: `mkdir -p ~/meta-diagnostics/raw`
+Reference `account_id` from config. Set shell variable: `ACCT=<account_id from config>`
 
-**Pull A — 90-day ad data** (Analyses 1, 2, 3):
-Call `meta_get_ads` with `date_range: "last_90d"`
-Store as `ads_90d`.
-Write to disk: `~/meta-diagnostics/raw/ads_90d.json`
-If the response is an error, write `{"error": "<message>", "data": []}` — never skip the write.
+Create the raw data directory: `mkdir -p ~/meta-diagnostics/raw`
+
+Compute date strings from today (use `date` command or calculate manually):
+- `TODAY` = today in YYYY-MM-DD
+- `DATE_90D` = today minus 90 days in YYYY-MM-DD
+- `DATE_6M` = today minus 6 months in YYYY-MM-DD
+- `DATE_13M_START` = first day of the month 13 months ago in YYYY-MM-DD
+
+The conversion event for filtering is `Purchase`. The Meta API action_type values that represent
+a purchase are: `purchase`, `omni_purchase`, `offsite_conversion.fb_pixel_purchase` — check all three.
+
+---
+
+**Pull A — 90-day ad insights + ad list** (Analyses 1, 2, 3):
+
+```bash
+meta ads --ad-account-id $ACCT insights get \
+  --date-preset last_90d \
+  --time-increment all_days \
+  --fields "ad_id,ad_name,spend,actions,cost_per_action_type" \
+  --limit 500 \
+  --output json > /tmp/meta_insights_90d_raw.json
+
+meta ads --ad-account-id $ACCT ad list \
+  --limit 1000 \
+  --output json > /tmp/meta_ad_list.json
+```
+
+Then run this Python to normalize and write `ads_90d.json`:
+```python
+import json, os
+
+PURCHASE = {'purchase','omni_purchase','offsite_conversion.fb_pixel_purchase'}
+
+with open('/tmp/meta_insights_90d_raw.json') as f: raw = json.load(f)
+data = raw.get('data', raw) if isinstance(raw, dict) else raw
+
+with open('/tmp/meta_ad_list.json') as f: al = json.load(f)
+ads_list = al.get('data', []) if isinstance(al, dict) else al
+created_map = {a['id']: a.get('created_time','') for a in ads_list}
+
+normalized = []
+for row in data:
+    ad_id = row.get('ad_id','')
+    spend = float(row.get('spend',0) or 0)
+    conversions = sum(int(float(a.get('value',0))) for a in row.get('actions',[]) if a.get('action_type','') in PURCHASE)
+    cpa = next((float(c.get('value',0) or 0) for c in row.get('cost_per_action_type',[]) if c.get('action_type','') in PURCHASE), 0.0)
+    normalized.append({'ad_id':ad_id,'ad_name':row.get('ad_name',''),'spend':spend,'conversions':conversions,'cpa':cpa,'created_time':created_map.get(ad_id,'')})
+
+since = data[0].get('date_start','') if data else ''
+until = data[-1].get('date_stop','') if data else ''
+out = {'ads': normalized, 'since': since, 'until': until}
+with open(os.path.expanduser('~/meta-diagnostics/raw/ads_90d.json'),'w') as f: json.dump(out,f,indent=2)
+print(f"ads_90d: {len(normalized)} ads, {since} to {until}")
+```
+
+If the CLI fails or returns empty, write `{"ads": [], "since": "", "until": "", "error": "<message>"}` — never skip the write.
+
+---
 
 **Pull B — 6-month ad data** (Analyses 4, 5, 7):
-Call `meta_get_ads` with `date_range: "last_6_months"`.
-Store as `ads_6m`.
-Write to disk: `~/meta-diagnostics/raw/ads_6m.json`
-If the response is an error, write `{"error": "<message>", "data": []}`.
 
-If you need a custom window (e.g. a prior period), pass the date_range as a JSON string:
-`date_range: '{"since":"2025-10-24","until":"2026-01-22"}'`
-Do NOT pass the literal string `"custom"` or any other free-text value — that is not a valid preset and will return an error.
+```bash
+meta ads --ad-account-id $ACCT insights get \
+  --since $DATE_6M \
+  --until $TODAY \
+  --time-increment all_days \
+  --fields "ad_id,ad_name,spend,actions,cost_per_action_type" \
+  --limit 1000 \
+  --output json > /tmp/meta_insights_6m_raw.json
+```
 
-After every `meta_get_ads` call, verify the response includes `since` and `until` fields that match the window you requested. If they differ by more than 3 days, surface a warning and ask the user whether to continue with the returned window or abort.
+Normalize with the same Python pattern as Pull A (reuse `/tmp/meta_ad_list.json` for `created_map`).
+Write to `~/meta-diagnostics/raw/ads_6m.json` with `since`/`until` from the response.
+
+---
 
 **Pull C — Monthly reach** (Analysis 6):
-Call `meta_get_monthly_reach` with `months: 13`
-Store as `monthly_reach`.
-Write to disk: `~/meta-diagnostics/raw/monthly_reach.json`
-If the response is an error or empty, write `[]`.
+
+```bash
+meta ads --ad-account-id $ACCT insights get \
+  --since $DATE_13M_START \
+  --until $TODAY \
+  --time-increment monthly \
+  --fields "reach,impressions,spend,frequency" \
+  --limit 15 \
+  --output json > /tmp/meta_reach_monthly_raw.json
+```
+
+Normalize with Python:
+```python
+import json, os
+
+with open('/tmp/meta_reach_monthly_raw.json') as f: raw = json.load(f)
+data = raw.get('data', raw) if isinstance(raw, dict) else raw
+
+normalized = []
+for row in data:
+    month = row.get('date_start','')[:7]  # YYYY-MM from date_start
+    normalized.append({
+        'month': month,
+        'reach': int(row.get('reach', 0) or 0),
+        'impressions': int(row.get('impressions', 0) or 0),
+        'spend': float(row.get('spend', 0) or 0),
+        'frequency': float(row.get('frequency', 0) or 0)
+    })
+
+with open(os.path.expanduser('~/meta-diagnostics/raw/monthly_reach.json'),'w') as f: json.dump(normalized,f,indent=2)
+print(f"monthly_reach: {len(normalized)} months")
+```
+
+If the response is empty, write `[]`.
+
+---
 
 **Pull D — Account overview** (spend tier for Analysis 7):
-Call `meta_get_account_overview` with `date_range: "last_90d"`
-Store as `account_overview`.
-Write to disk: `~/meta-diagnostics/raw/account_overview.json`
-If the response is an error, write `{}`.
+
+```bash
+meta ads --ad-account-id $ACCT adaccount get $ACCT --output json > /tmp/meta_account_raw.json
+
+meta ads --ad-account-id $ACCT insights get \
+  --date-preset last_90d \
+  --fields "spend,reach,impressions" \
+  --output json > /tmp/meta_account_insights_raw.json
+```
+
+Normalize with Python:
+```python
+import json, os
+
+with open('/tmp/meta_account_raw.json') as f: acct = json.load(f)
+with open('/tmp/meta_account_insights_raw.json') as f: ins = json.load(f)
+ins_data = ins.get('data', []) if isinstance(ins, dict) else ins
+total_spend = sum(float(r.get('spend',0) or 0) for r in ins_data)
+
+out = {
+    'account_id': acct.get('id','') if isinstance(acct,dict) else '',
+    'account_name': acct.get('name','') if isinstance(acct,dict) else '',
+    'spend': str(total_spend)
+}
+with open(os.path.expanduser('~/meta-diagnostics/raw/account_overview.json'),'w') as f: json.dump(out,f,indent=2)
+print(f"account_overview: ${total_spend:,.2f} spend (90d)")
+```
+
+If the CLI fails, write `{}`.
+
+---
 
 **Pull E — Per-ad monthly spend** (Analyses 3 and 4):
-Call `meta_get_ad_monthly_spend` with `months: 6`
-Store as `ad_monthly_spend`.
-Write to disk: `~/meta-diagnostics/raw/ad_monthly_spend.json`
-If the response is an error or empty, write `[]`.
+
+```bash
+meta ads --ad-account-id $ACCT insights get \
+  --since $DATE_6M \
+  --until $TODAY \
+  --time-increment monthly \
+  --fields "ad_id,ad_name,spend" \
+  --limit 2000 \
+  --output json > /tmp/meta_monthly_spend_raw.json
+```
+
+Normalize with Python:
+```python
+import json, os
+
+with open('/tmp/meta_monthly_spend_raw.json') as f: raw = json.load(f)
+data = raw.get('data', raw) if isinstance(raw, dict) else raw
+
+normalized = []
+for row in data:
+    spend = float(row.get('spend',0) or 0)
+    if spend > 0:
+        normalized.append({
+            'ad_id': row.get('ad_id',''),
+            'ad_name': row.get('ad_name',''),
+            'month': row.get('date_start','')[:7],
+            'spend': spend
+        })
+
+with open(os.path.expanduser('~/meta-diagnostics/raw/ad_monthly_spend.json'),'w') as f: json.dump(normalized,f,indent=2)
+print(f"ad_monthly_spend: {len(normalized)} rows")
+```
+
+If empty, write `[]`.
+
+---
 
 Tell the user: "Data pulled. Raw data saved to ~/meta-diagnostics/raw/ (5 files). Running analyses..."
 
@@ -489,8 +647,11 @@ Your full report is also saved at:
 
 ## ERROR HANDLING
 
-**Meta not connected:**
-"Run /ads-connect first, then re-run /meta-diagnostics."
+**Meta not connected (`meta auth status` returns non-zero):**
+"Run `meta auth login` in your terminal — it opens a browser for Meta Business OAuth. Once done, re-run /meta-diagnostics."
+
+**`meta` CLI not found:**
+"Install it with `pip install meta-ads`, then run `meta auth login` to authenticate."
 
 **API returns empty data:**
 Run the analysis with zeros. Set verdict to WARNING if the data pull returned nothing (could be a date range with no activity). Note in `meaning`: "No ad data was returned for this period — verify your account has active ads in the last 90 days."
